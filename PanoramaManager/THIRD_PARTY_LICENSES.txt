@@ -1,0 +1,107 @@
+第三方依赖与许可证清单
+Third-Party Licenses
+================================================================================
+
+本软件使用了以下第三方库和商业 SDK，特此声明并感谢相关开发者。
+
+================================================================================
+1. PyQt6 / PySide6
+================================================================================
+用途: PC 端图形用户界面框架
+许可证: GNU Lesser General Public License v3 (LGPL v3)
+官网: https://www.qt.io/
+
+PyQt6 和 PySide6 是 Qt 框架的 Python 绑定，采用 LGPL v3 许可证。
+根据 LGPL 要求，您有权获得源代码，并可以修改和重新分发。
+本软件以动态链接方式使用 Qt 库，符合 LGPL 商用要求。
+
+许可证全文: https://www.gnu.org/licenses/lgpl-3.0.html
+
+================================================================================
+2. Pillow (PIL Fork)
+================================================================================
+用途: 图片处理和缩略图生成
+许可证: HPND (Historical Permission Notice and Disclaimer)
+官网: https://python-pillow.org/
+
+Copyright © 2010-2024 by Jeffrey A. Clark (Alex) and contributors
+
+HPND 许可证允许自由使用、修改和分发，包括商业用途。
+
+许可证全文: https://github.com/python-pillow/Pillow/blob/master/LICENSE
+
+================================================================================
+3. Pannellum
+================================================================================
+用途: 网页端全景照片渲染
+许可证: MIT License
+官网: https://pannellum.org/
+作者: Matthew Petroff
+
+Copyright (c) 2011-2023 Matthew Petroff
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+================================================================================
+4. qrcode (Python)
+================================================================================
+用途: 二维码生成
+许可证: BSD 3-Clause License
+官网: https://github.com/lincolnloop/python-qrcode
+
+Copyright (c) 2011, Lincoln Loop
+All rights reserved.
+
+BSD 许可证允许自由使用和分发，包括商业用途。
+
+================================================================================
+5. PyInstaller
+================================================================================
+用途: Python 程序打包为可执行文件
+许可证: GPL v2 with exception
+官网: https://www.pyinstaller.org/
+
+PyInstaller 使用 GPL v2 许可证，但特别注明：
+使用 PyInstaller 生成的打包文件不受 GPL 感染，可自由分发，包括商业用途。
+
+================================================================================
+6. DJI Mobile SDK
+================================================================================
+用途: iOS 端蓝牙控制 DJI Osmo 360 相机
+许可证: DJI 开发者协议
+官网: https://developer.dji.com/
+
+使用 DJI Mobile SDK 需要注册 DJI 开发者账号并遵守 DJI 开发者协议。
+本软件仅使用 SDK 进行蓝牙相机控制功能。
+
+================================================================================
+7. Python Standard Library (http.server)
+================================================================================
+用途: PC 端本地 HTTP 服务器
+许可证: PSF License Agreement
+官网: https://www.python.org/
+
+Python 标准库遵循 PSF 许可证，允许自由使用和分发。
+
+================================================================================
+免责声明
+================================================================================
+
+本软件按"原样"提供，不作任何明示或暗示的担保。作者不对因使用本软件
+而产生的任何直接或间接损失承担责任。
+
+================================================================================
+版本信息
+================================================================================
+
+生成日期: 2025-01-22
+软件版本: v1.0
+项目: 影像平面图关联管理器

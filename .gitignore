@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.env
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 随系特定
+*.sxp
+projects/
+viewer/output/
+/test_media/
+/temp/
+
+# 内部文档（不上传）
+随系开发定位书.md
+*.private.md
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

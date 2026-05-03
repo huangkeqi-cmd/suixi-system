@@ -1,3 +1,12 @@
+/**
+ * 随心系统 / Suixin System
+ * Copyright (c) 2026 huangkeqi
+ * 保留所有权利。
+ * 
+ * 本软件目前为个人工作流工具，未经授权不得用于商业用途。
+ * 商业合作请联系：376524686@qq.com
+ */
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -3041,6 +3050,33 @@ class PanoramaManager(QMainWindow):
             }
             .control-btn span { display: none; }
         }
+        
+        /* 品牌页脚 */
+        .brand-footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 6px 16px;
+            background: rgba(0,0,0,0.55);
+            color: rgba(255,255,255,0.55);
+            font-size: 11px;
+            text-align: center;
+            z-index: 200;
+            backdrop-filter: blur(4px);
+            pointer-events: auto;
+        }
+        .brand-footer a {
+            color: #0A84FF;
+            text-decoration: none;
+            margin-left: 6px;
+        }
+        .brand-footer a:hover {
+            text-decoration: underline;
+        }
+        @media (max-width: 768px) {
+            .brand-footer { font-size: 10px; padding: 4px 12px; }
+        }
     </style>
 </head>
 <body>
@@ -3787,6 +3823,11 @@ class PanoramaManager(QMainWindow):
         // 启动
         init();
     </script>
+    <!-- 生成的查看器底部 -->
+    <div class="brand-footer">
+        <span>由 随心系统 生成</span>
+        <a href="https://github.com/huangkeqi-cmd/suixi-system">了解更多</a>
+    </div>
 </body>
 </html>'''
         

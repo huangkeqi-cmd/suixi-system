@@ -1,3 +1,12 @@
+/**
+ * 随心系统 / Suixin System
+ * Copyright (c) 2026 huangkeqi
+ * 保留所有权利。
+ * 
+ * 本软件目前为个人工作流工具，未经授权不得用于商业用途。
+ * 商业合作请联系：376524686@qq.com
+ */
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """

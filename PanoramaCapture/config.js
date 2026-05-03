@@ -3,8 +3,8 @@
  * Copyright (c) 2026 huangkeqi
  * 保留所有权利。
  * 
- * 本软件目前为个人工作流工具，未经授权不得用于商业用途。
- * 商业合作请联系：376524686@qq.com
+ * 本软件目前为个人工作流工具，开源供学习参考。
+ * 项目主页：https://github.com/huangkeqi-cmd/suixi-system
  */
 
 /**

@@ -27,3 +27,31 @@ viewer/output/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 日志与临时文件
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+
+# Node.js（为未来前端扩展预留）
+node_modules/
+package-lock.json
+yarn.lock
+
+# 构建产物（通用）
+out/
+coverage/
+
+# 临时脚本（开发辅助）
+split_capture.py
+pdf_to_jpg.py
+
+# 内部交付文档（不上传）
+PanoramaManager/HTTPS配置指南.md
+PanoramaManager/TestFlight安装指南.txt
+PanoramaManager/使用说明.txt
+
+# 大体积媒体文件
+PanoramaCapture/promo_video.mp4

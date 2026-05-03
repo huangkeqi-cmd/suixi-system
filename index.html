@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>随心系统 / Suixin System — 现场影像工作流</title>
+  <meta name="description" content="随心系统是一套面向城市更新与商业改造现场的离线影像工作流工具，包含随拍（移动端采集）、随管（PC端管理）、随看（全景查看）三个模块。">
+  <meta name="keywords" content="影像采集,全景图,点位标记,城市更新,现场工作流,离线工具,个人工作流">
+  <meta name="author" content="huangkeqi">
+  <meta property="og:title" content="随心系统 / Suixin System">
+  <meta property="og:description" content="面向城市更新与商业改造现场的离线影像工作流工具集。">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://huangkeqi-cmd.github.io/suixi-system/">
+  <meta name="theme-color" content="#0a84ff">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛠️</text></svg>">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#0a84ff', 600: '#0066cc' },
+            surface: { 800: '#1c1c1e', 900: '#0a0a0a' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    html { scroll-behavior: smooth; }
+    .glass {
+      background: rgba(28, 28, 30, 0.75);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .module-card {
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .module-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 40px rgba(10, 132, 255, 0.15);
+    }
+    .placeholder-card {
+      border: 2px dashed rgba(255, 255, 255, 0.1);
+      background: repeating-linear-gradient(
+        45deg,
+        rgba(255, 255, 255, 0.02),
+        rgba(255, 255, 255, 0.02) 10px,
+        transparent 10px,
+        transparent 20px
+      );
+    }
+  </style>
+</head>
+<body class="bg-surface-900 text-gray-100 min-h-screen antialiased">
+
+  <!-- 顶部导航 -->
+  <nav class="fixed top-0 left-0 right-0 z-50 glass border-b border-white/5">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-2 text-white font-bold text-lg tracking-tight">
+        <span class="text-2xl">🛠️</span>
+        <span>随心系统</span>
+      </a>
+      <div class="flex items-center gap-3">
+        <a href="https://github.com/huangkeqi-cmd/suixi-system" target="_blank" rel="noopener"
+           class="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-sm transition-colors">
+          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+        <!-- 预留扩展：可在此处加入新功能入口图标/按钮 -->
+        <div class="hidden md:flex items-center gap-2 ml-2 pl-3 border-l border-white/10">
+          <span class="text-xs text-gray-500 uppercase tracking-wider">扩展接口</span>
+          <button class="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-colors cursor-default" title="预留模块入口">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <header class="pt-32 pb-16 px-4 sm:px-6">
+    <div class="max-w-4xl mx-auto text-center">
+      <h1 class="text-4xl sm:text-5xl font-extrabold tracking-tight mb-4">
+        让工具追上现场的速度
+      </h1>
+      <p class="text-lg sm:text-xl text-gray-400 max-w-2xl mx-auto leading-relaxed">
+        随心系统是一套面向城市更新与商业改造现场的<strong class="text-white">离线影像工作流工具</strong>。
+        纯前端、零部署、移动端第一，先跑起来，再慢慢长。
+      </p>
+      <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <a href="./PanoramaCapture/capture.html"
+           class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-semibold transition-colors shadow-lg shadow-brand-500/20">
+          <span>📷</span> 打开随拍
+        </a>
+        <a href="https://github.com/huangkeqi-cmd/suixi-system#readme" target="_blank" rel="noopener"
+           class="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-white/5 hover:bg-white/10 text-white font-semibold transition-colors border border-white/10">
+          <span>📖</span> 使用文档
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- 核心模块 -->
+  <section class="px-4 sm:px-6 pb-20">
+    <div class="max-w-6xl mx-auto">
+      <div class="flex items-center gap-3 mb-8">
+        <h2 class="text-2xl font-bold">核心模块</h2>
+        <span class="px-2 py-0.5 rounded-md bg-white/5 text-xs text-gray-400 border border-white/5">v3.0</span>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+        <!-- 随拍 -->
+        <a href="./PanoramaCapture/capture.html" class="module-card group block rounded-2xl glass p-6 hover:border-brand-500/30">
+          <div class="w-12 h-12 rounded-xl bg-brand-500/10 flex items-center justify-center text-2xl mb-4 group-hover:scale-110 transition-transform">
+            📷
+          </div>
+          <h3 class="text-lg font-bold mb-2">随拍</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            手机端现场影像采集。支持点位标记、平面图叠加、扇形视线方向、陀螺仪对齐，数据离线存储在本地。
+          </p>
+          <div class="mt-4 flex items-center gap-2 text-sm text-brand-500 font-medium">
+            <span>进入采集端</span>
+            <svg class="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+          </div>
+        </a>
+
+        <!-- 随管 -->
+        <div class="module-card group block rounded-2xl glass p-6">
+          <div class="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center text-2xl mb-4">
+            🗂️
+          </div>
+          <h3 class="text-lg font-bold mb-2">随管</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            PC 端影像管理与智能匹配。自动关联采集点与照片时间戳，生成离线全景查看器，支持导出 ZIP 项目包。
+          </p>
+          <div class="mt-4 flex items-center gap-2 text-sm text-emerald-400 font-medium">
+            <span>本地运行 · Python</span>
+          </div>
+        </div>
+
+        <!-- 随看 -->
+        <div class="module-card group block rounded-2xl glass p-6">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/10 flex items-center justify-center text-2xl mb-4">
+            👁️
+          </div>
+          <h3 class="text-lg font-bold mb-2">随看</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            全景查看与汇报展示。由随管自动生成，支持多楼层切换、VR 模式、陀螺仪浏览，离线也可打开。
+          </p>
+          <div class="mt-4 flex items-center gap-2 text-sm text-amber-400 font-medium">
+            <span>自动生成 · 离线可用</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 预留扩展区：功能卡片占位 -->
+  <section class="px-4 sm:px-6 pb-16">
+    <div class="max-w-6xl mx-auto">
+      <div class="flex items-center gap-3 mb-8">
+        <h2 class="text-2xl font-bold">扩展规划</h2>
+        <span class="px-2 py-0.5 rounded-md bg-white/5 text-xs text-gray-500 border border-white/5">占位区域</span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        <!-- 预留扩展：可在此处加入数据同步功能 -->
+        <div class="placeholder-card rounded-2xl p-6 flex flex-col items-center justify-center text-center min-h-[200px]">
+          <div class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-3 text-gray-500">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+          </div>
+          <p class="text-sm text-gray-500 font-medium">数据云端同步</p>
+          <p class="text-xs text-gray-600 mt-1">预留扩展：可在此处加入多端数据同步能力</p>
+        </div>
+
+        <!-- 预留扩展：可在此处加入协同编辑功能 -->
+        <div class="placeholder-card rounded-2xl p-6 flex flex-col items-center justify-center text-center min-h-[200px]">
+          <div class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-3 text-gray-500">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"/></svg>
+          </div>
+          <p class="text-sm text-gray-500 font-medium">协同标注</p>
+          <p class="text-xs text-gray-600 mt-1">预留扩展：可在此处加入多人协作标注能力</p>
+        </div>
+
+        <!-- 预留扩展：可在此处加入更多导出格式 -->
+        <div class="placeholder-card rounded-2xl p-6 flex flex-col items-center justify-center text-center min-h-[200px]">
+          <div class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-3 text-gray-500">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          </div>
+          <p class="text-sm text-gray-500 font-medium">丰富导出格式</p>
+          <p class="text-xs text-gray-600 mt-1">预留扩展：可在此处加入 CAD / PDF / 报告导出能力</p>
+        </div>
+
+        <!-- 预留扩展：可在此处加入新的模块入口 -->
+        <div class="placeholder-card rounded-2xl p-6 flex flex-col items-center justify-center text-center min-h-[200px]">
+          <div class="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center mb-3 text-gray-500">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/></svg>
+          </div>
+          <p class="text-sm text-gray-500 font-medium">新模块接口</p>
+          <p class="text-xs text-gray-600 mt-1">预留扩展：可在此处接入新的功能模块</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 预留扩展区：表单与配置容器占位 -->
+  <section class="px-4 sm:px-6 pb-20">
+    <div class="max-w-6xl mx-auto">
+      <div class="rounded-2xl glass p-6 sm:p-8">
+        <div class="flex items-center justify-between mb-6">
+          <h3 class="text-lg font-bold">系统配置预览</h3>
+          <span class="text-xs text-gray-500 bg-white/5 px-2 py-1 rounded border border-white/5">预留表单容器</span>
+        </div>
+        <!-- 预留扩展：可在此处加入全局设置表单 -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-5">
+            <p class="text-sm text-gray-500 font-medium mb-1">项目参数配置</p>
+            <p class="text-xs text-gray-600">预留扩展：可在此处加入项目级默认参数表单，如时间容差、默认扇形角度、陀螺仪灵敏度等。</p>
+          </div>
+          <div class="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-5">
+            <p class="text-sm text-gray-500 font-medium mb-1">界面与交互偏好</p>
+            <p class="text-xs text-gray-600">预留扩展：可在此处加入主题切换、手势灵敏度、省电策略等用户偏好设置。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 页脚 -->
+  <footer class="border-t border-white/5 py-10 px-4 sm:px-6">
+    <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+      <div class="flex items-center gap-2 text-sm text-gray-500">
+        <span>🛠️</span>
+        <span>随心系统 / Suixin System</span>
+        <span class="hidden sm:inline">·</span>
+        <span class="hidden sm:inline">个人工作流工具</span>
+      </div>
+      <div class="flex items-center gap-4 text-sm">
+        <a href="https://github.com/huangkeqi-cmd/suixi-system" target="_blank" rel="noopener" class="text-gray-400 hover:text-white transition-colors">GitHub</a>
+        <a href="./PanoramaCapture/capture.html" class="text-gray-400 hover:text-white transition-colors">随拍</a>
+        <span class="text-gray-600">MIT License</span>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

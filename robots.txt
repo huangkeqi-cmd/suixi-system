@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Allow: /PanoramaCapture/
+Allow: /PanoramaManager/
+
+Sitemap: https://huangkeqi-cmd.github.io/suixi-system/sitemap.xml

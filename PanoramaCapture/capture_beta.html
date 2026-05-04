@@ -249,18 +249,23 @@
             height: 100%;
             display: none;
         }
-        body.crosshair-style-1 .crosshair-style-inner.style1 { display: block; }
-        body.crosshair-style-2 .crosshair-style-inner.style2 { display: block; }
-        body.crosshair-style-3 .crosshair-style-inner.style3 { display: block; }
+        body.crosshair-style-1 .crosshair-style-inner.style1 {
+            display: block;
+        }
+        body.crosshair-style-2 .crosshair-style-inner.style2 {
+            display: block;
+        }
+        body.crosshair-style-3 .crosshair-style-inner.style3 {
+            display: block;
+        }
 
         .crosshair-style-inner.style1 {
             border-radius: 50%;
             border: 2px solid var(--crosshair-color);
-            background: radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 35%, var(--crosshair-color) 36%, rgba(0,0,0,0) 40%);
-            box-shadow: inset 0 0 6px rgba(0,0,0,0.7), 0 0 10px rgba(0,0,0,0.5);
+            background: radial-gradient(circle at 50% 50%, rgba(0, 0, 0, 0) 35%, var(--crosshair-color) 36%, rgba(0, 0, 0, 0) 40%);
+            box-shadow: inset 0 0 6px rgba(0, 0, 0, 0.7), 0 0 10px rgba(0, 0, 0, 0.5);
         }
         .crosshair-style-inner.style2 {
-            /* original crosshair drawn via pseudo-elements on parent, so this inner is unused for style2 */
             display: none !important;
         }
         body.crosshair-style-2 #screenCrosshair::before,
@@ -276,7 +281,7 @@
             top: 50%;
             transform: translate(-50%, -50%);
             box-shadow: 0 calc(var(--crosshair-length) * -0.5) 0 0 var(--crosshair-color),
-                        0 calc(var(--crosshair-length) * 0.5) 0 0 var(--crosshair-color);
+                0 calc(var(--crosshair-length) * 0.5) 0 0 var(--crosshair-color);
         }
         body.crosshair-style-2 #screenCrosshair::after {
             width: var(--crosshair-length);
@@ -285,7 +290,7 @@
             left: 50%;
             transform: translate(-50%, -50%);
             box-shadow: calc(var(--crosshair-length) * -0.5) 0 0 0 var(--crosshair-color),
-                        calc(var(--crosshair-length) * 0.5) 0 0 0 var(--crosshair-color);
+                calc(var(--crosshair-length) * 0.5) 0 0 0 var(--crosshair-color);
         }
         body.crosshair-style-3 .crosshair-style-inner.style3 {
             position: absolute;
@@ -324,11 +329,16 @@
             transform: translate(-50%, -50%);
         }
         @keyframes crosshair-breathe {
-            0%, 100% { filter: drop-shadow(0 0 4px rgba(255,255,255,0.3)) drop-shadow(0 0 8px rgba(255,255,255,0.1)); }
-            50% { filter: drop-shadow(0 0 8px rgba(255,255,255,0.5)) drop-shadow(0 0 16px rgba(255,255,255,0.2)); }
+            0%,
+            100% {
+                filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.3)) drop-shadow(0 0 8px rgba(255, 255, 255, 0.1));
+            }
+            50% {
+                filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.5)) drop-shadow(0 0 16px rgba(255, 255, 255, 0.2));
+            }
         }
         #screenCrosshair {
-            filter: drop-shadow(0 0 1.5px rgba(255,255,255,0.9)) drop-shadow(0 0 8px rgba(255,255,255,0.3));
+            filter: drop-shadow(0 0 1.5px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 8px rgba(255, 255, 255, 0.3));
             animation: crosshair-breathe var(--crosshair-breathe-speed, 2.5s) ease-in-out infinite;
         }
         #planLayer {
@@ -355,6 +365,8 @@
             height: 100%;
             pointer-events: none;
             z-index: 10;
+            transform-origin: center center;
+            will-change: transform;
         }
         #dotsLayer>* {
             pointer-events: auto;
@@ -928,8 +940,13 @@
             letter-spacing: 0.3px;
         }
         @keyframes pulse-dot {
-            0%, 100% { box-shadow: 0 0 16px rgba(255, 149, 0, 0.5); }
-            50% { box-shadow: 0 0 28px rgba(255, 149, 0, 0.85); }
+            0%,
+            100% {
+                box-shadow: 0 0 16px rgba(255, 149, 0, 0.5);
+            }
+            50% {
+                box-shadow: 0 0 28px rgba(255, 149, 0, 0.85);
+            }
         }
         .overlay-panel {
             position: fixed;
@@ -1328,8 +1345,14 @@
             animation: batchPanelIn 0.2s ease-out;
         }
         @keyframes batchPanelIn {
-            from { opacity: 0; transform: scale(0.9); }
-            to { opacity: 1; transform: scale(1); }
+            from {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
         }
         #batchOptionsOverlay {
             position: fixed !important;
@@ -1699,7 +1722,7 @@
         </div>
     </div>
     <script>
-        const APP_VERSION = '20260504-fix-buttons-picker-panel';
+        const APP_VERSION = '20260504-fix-buttons-v3';
         var PROJ = null,
             FLOORS = [],
             CURRENT_FLOOR = null,
@@ -1726,6 +1749,8 @@
         var NORTH_CALIBRATION = 0;
         var PLAN_ROTATION = 0;
         var smoothRotation = 0;
+        var lastPlanRotationUpdate = 0;
+        var planRotationRafId = null;
         var GYRO_SMOOTH_HEADING = null;
         var GYRO_FILTER_ALPHA = 0.08;
         var GYRO_MAX_DELTA = 6;
@@ -1764,7 +1789,6 @@
         var globalLastTapTarget = null;
         var globalLastTapTime = 0;
         var CROSSHAIR_STYLE = 2;
-
         var POWER_SAVE_CUSTOM = {
             disableAnimations: false,
             disableGyro: false,
@@ -1897,6 +1921,10 @@
             GYRO_SMOOTH_HEADING = null;
             GYRO_ACTIVE = false;
             updateGyroStatusBadge();
+            if (planRotationRafId) {
+                cancelAnimationFrame(planRotationRafId);
+                planRotationRafId = null;
+            }
         }
 
         function updateGyroStatusBadge() {
@@ -1923,6 +1951,7 @@
                 PLAN_HEADING_OFFSET = 0;
                 smoothRotation = 0;
                 $('planLayer').style.transform = 'rotate(0deg)';
+                $('dotsLayer').style.transform = 'rotate(0deg)';
                 $('compassBtn').style.display = 'block';
                 $('compassBtn').classList.remove('plan-aligned');
                 $('compassBtn').classList.add('offline-mode');
@@ -1958,15 +1987,28 @@
             var rawTarget = -(GYRO_HEADING - PLAN_HEADING_OFFSET - NORTH_CALIBRATION);
             var delta = normalizeAngleDelta(rawTarget - smoothRotation);
             smoothRotation += delta * 0.12;
-            var layer = $('planLayer'); if (!layer) return;
-            var cx = wrap.clientWidth / 2;
-            var cy = wrap.clientHeight / 2;
-            layer.style.transformOrigin = cx + 'px ' + cy + 'px';
-            layer.style.transform = 'rotate(' + smoothRotation.toFixed(2) + 'deg)';
             PLAN_ROTATION = smoothRotation;
-            updateCompassNeedle();
-            updateAlignCompass();
-            updateDots();
+            if (planRotationRafId) return;
+            planRotationRafId = requestAnimationFrame(function() {
+                planRotationRafId = null;
+                var now = Date.now();
+                if (now - lastPlanRotationUpdate < 50) return;
+                lastPlanRotationUpdate = now;
+                if (!PLAN_ALIGNED || GYRO_HEADING === null || OFFLINE_MODE || POWER_SAVE_CUSTOM.disableGyro) return;
+                var cx = wrap.clientWidth / 2;
+                var cy = wrap.clientHeight / 2;
+                var layer = $('planLayer');
+                if (layer) {
+                    layer.style.transformOrigin = cx + 'px ' + cy + 'px';
+                    layer.style.transform = 'rotate(' + smoothRotation.toFixed(2) + 'deg)';
+                }
+                var dotsLayer = $('dotsLayer');
+                if (dotsLayer) {
+                    dotsLayer.style.transformOrigin = cx + 'px ' + cy + 'px';
+                    dotsLayer.style.transform = 'rotate(' + smoothRotation.toFixed(2) + 'deg)';
+                }
+                updateCompassNeedle();
+            });
         }
 
         function screenToImageCoords(sx, sy, rotation) {
@@ -1998,7 +2040,7 @@
 
         function imageToScreenCoords(ix, iy, rotation) {
             var rot = (rotation !== undefined) ? rotation : smoothRotation;
-            if (!PLAN_ALIGNED || Math.abs(rot) < 0.1 || OFFLINE_MODE) {
+            if (!PLAN_ALIGNED || Math.abs(rot) < 0.1 || OFFLINE_MODE || (rotation !== undefined && rotation === 0)) {
                 return { x: OFF_X + ix * IMG_W * SCALE, y: OFF_Y + iy * IMG_H * SCALE };
             }
             var cx = wrap.clientWidth / 2;
@@ -2029,8 +2071,6 @@
             if (OFFLINE_MODE) btn.classList.add('offline-mode');
             else btn.classList.remove('offline-mode');
         }
-
-        function updateAlignCompass() {}
 
         function checkAlignmentPrompt() {
             var mods = getCustomModules();
@@ -2089,6 +2129,7 @@
                 GYRO_HEADING = currentHeading; }
             smoothRotation = 0;
             $('planLayer').style.transform = 'rotate(0deg)';
+            $('dotsLayer').style.transform = 'rotate(0deg)';
             $('planAlignPanel').style.display = 'none';
             $('compassBtn').style.display = 'block';
             $('compassBtn').classList.add('plan-aligned');
@@ -2098,6 +2139,7 @@
             updateCompassNeedle();
             updateGyroStatusBadge();
             savePlanAlignmentSettings();
+            updateDots();
             showMsg('✅ 方向导航已启动！漂移补偿已重置');
         }
 
@@ -2114,8 +2156,10 @@
             hideCompassPanel();
             PLAN_ALIGNED = false;
             $('planLayer').style.transform = 'rotate(0deg)';
+            $('dotsLayer').style.transform = 'rotate(0deg)';
             $('compassBtn').classList.remove('plan-aligned');
             savePlanAlignmentSettings();
+            updateDots();
             setTimeout(function() { startPlanAlignment(); }, 300);
         }
 
@@ -2170,6 +2214,7 @@
                 lastGyroTimestamp = 0;
                 GYRO_SMOOTH_HEADING = currentHeading;
                 GYRO_HEADING = currentHeading;
+                smoothRotation = 0;
             }
             $('planAlignPanel').style.display = 'none';
             $('compassBtn').style.display = 'block';
@@ -2177,8 +2222,11 @@
             if (alignCompassInterval) { clearInterval(alignCompassInterval);
                 alignCompassInterval = null; }
             var layer = $('planAlignLayer'); if (layer) { layer.style.transform = 'rotate(0deg)'; }
+            $('planLayer').style.transform = 'rotate(0deg)';
+            $('dotsLayer').style.transform = 'rotate(0deg)';
             updateCompassNeedle();
             savePlanAlignmentSettings();
+            updateDots();
             showMsg('✅ 指北针已校准，漂移补偿已重置');
             startGlobalGyro();
         }
@@ -2242,7 +2290,6 @@
             var btnCustom = $('modeCustom');
             var desc = $('modeDesc');
             var customArea = $('customModulesArea');
-
             [btnMulti, btnMinimal, btnCustom].forEach(function(btn) {
                 if (!btn) return;
                 btn.style.background = '#2c2c2e';
@@ -2250,7 +2297,6 @@
                 btn.style.border = '1px solid #38383a';
                 btn.style.fontWeight = 'normal';
             });
-
             var activeBtn = mode === 'multi' ? btnMulti : (mode === 'minimal' ? btnMinimal : btnCustom);
             if (activeBtn) {
                 activeBtn.style.background = '#0a84ff';
@@ -2258,7 +2304,6 @@
                 activeBtn.style.border = 'none';
                 activeBtn.style.fontWeight = '600';
             }
-
             if (mode === 'multi') {
                 desc.innerHTML = '多楼层模式：支持多个楼层和批量导入，全部功能模块可用';
                 if (customArea) customArea.style.display = 'none';
@@ -2300,7 +2345,9 @@
                 PLAN_ALIGNED = false;
                 smoothRotation = 0;
                 $('planLayer').style.transform = 'rotate(0deg)';
+                $('dotsLayer').style.transform = 'rotate(0deg)';
                 $('compassBtn').classList.remove('plan-aligned');
+                updateDots();
             }
             if (!mods.compass) {
                 $('compassBtn').style.display = 'none';
@@ -2308,6 +2355,8 @@
                 PLAN_ALIGNED = false;
                 smoothRotation = 0;
                 $('planLayer').style.transform = 'rotate(0deg)';
+                $('dotsLayer').style.transform = 'rotate(0deg)';
+                updateDots();
             } else {
                 if ($('compassBtn').style.display === 'none' && CURRENT_FLOOR && FLOORPLANS[CURRENT_FLOOR]) {
                     $('compassBtn').style.display = 'block';
@@ -2368,6 +2417,7 @@
             NORTH_CALIBRATION = 0;
             smoothRotation = 0;
             $('planLayer').style.transform = 'rotate(0deg)';
+            $('dotsLayer').style.transform = 'rotate(0deg)';
             $('compassBtn').style.display = 'none';
             $('compassBtn').classList.remove('plan-aligned');
             savePlanAlignmentSettings();
@@ -2397,7 +2447,6 @@
             var mods = getCustomModules();
             var isMinimal = PROJ && PROJ.minimalMode;
             var isCustom = PROJ && PROJ.customMode;
-
             var batchBtn = document.querySelector('.top-buttons button[onclick="showBatchOptions()"]');
             var floorBtn = document.querySelector('.top-buttons button[onclick="showFloorPanel()"]');
             var clearBtn = document.querySelector('.top-buttons button[onclick="showClearStoragePanel()"]');
@@ -2408,15 +2457,15 @@
             if (clearBtn) clearBtn.style.display = (!mods.clear) ? 'none' : '';
             if (themeBtn) themeBtn.style.display = (!mods.theme) ? 'none' : '';
             if (exportBtn) exportBtn.style.display = (!mods.export) ? 'none' : '';
-
             var sectorSection = $('panelSectorSection');
             if (sectorSection) sectorSection.style.display = mods.sectorView ? '' : 'none';
-
             if (!mods.planRotation) {
                 PLAN_ALIGNED = false;
                 smoothRotation = 0;
                 $('planLayer').style.transform = 'rotate(0deg)';
+                $('dotsLayer').style.transform = 'rotate(0deg)';
                 $('compassBtn').classList.remove('plan-aligned');
+                updateDots();
             }
             if (!mods.compass) {
                 $('compassBtn').style.display = 'none';
@@ -2426,7 +2475,6 @@
                 stopGlobalGyro();
                 $('compassBtn').style.display = 'none';
             }
-
             var modeBtn = $('modeToggleBtn');
             if (modeBtn) {
                 if (mods.phoneMode && mods.externalMode) {
@@ -2445,11 +2493,9 @@
                     }
                 }
             }
-
             if (!mods.continuousCapture && CONTINUOUS_MODE) {
                 exitContinuousMode();
             }
-
             var floatLabel = $('floorFloatLabel');
             var floatAdd = $('floorFloatAddBtn');
             if (floatLabel) floatLabel.style.display = 'none';
@@ -2499,6 +2545,7 @@
             NORTH_CALIBRATION = 0;
             smoothRotation = 0;
             $('planLayer').style.transform = 'rotate(0deg)';
+            $('dotsLayer').style.transform = 'rotate(0deg)';
             $('compassBtn').style.display = 'none';
             $('compassBtn').classList.remove('plan-aligned');
             savePlanAlignmentSettings(); var fid = generateId();
@@ -2536,8 +2583,8 @@
             document.body.appendChild(panel); }
 
         function closeBatchOptions() { var panel = $('batchOptionsOverlay'); if (panel) { panel.style.opacity = '0';
-                setTimeout(function() { if (panel && panel.parentNode) panel.parentNode.removeChild(panel); }, 200); } var
-                allPanels = document.querySelectorAll('.batch-options-panel');
+                if (panel.parentNode) panel.parentNode.removeChild(panel); } var allPanels = document.querySelectorAll(
+                    '.batch-options-panel');
             allPanels.forEach(function(p) { if (p.parentNode) p.parentNode.removeChild(p); }); }
 
         function importProjectZip() { closeBatchOptions(); var input = document.createElement('input');
@@ -2783,6 +2830,17 @@
             SCALE = s;
             OFF_X = (ww - IMG_W * s) / 2;
             OFF_Y = (wh - IMG_H * s) / 2;
+            var cx = ww / 2;
+            var cy = wh / 2;
+            var dotsLayer = $('dotsLayer');
+            if (dotsLayer) {
+                dotsLayer.style.transformOrigin = cx + 'px ' + cy + 'px';
+                if (PLAN_ALIGNED && !OFFLINE_MODE) {
+                    dotsLayer.style.transform = 'rotate(' + smoothRotation.toFixed(2) + 'deg)';
+                } else {
+                    dotsLayer.style.transform = 'rotate(0deg)';
+                }
+            }
             updateImage(); }
 
         function updateImage() { if ($('theImg').style.display === 'none') return;
@@ -3435,17 +3493,15 @@
             FLOORS = sorted;
             renderFloorList(); }
 
-        function clearDots() { var layer = $('dotsLayer'); if (!layer) { layer = $('planLayer'); } var dots = layer
-            .querySelectorAll('.dot'); for (var i = 0; i < dots.length; i++) layer.removeChild(dots[i]); var svg = layer
-                .querySelector('#routeSvg'); if (svg) layer.removeChild(svg); var sec = layer.querySelector(
-                '#directionSectors'); if (sec) layer.removeChild(sec); }
+        function clearDots() { var layer = $('dotsLayer') || $('planLayer'); var dots = layer.querySelectorAll('.dot'); for (var i =
+                0; i < dots.length; i++) layer.removeChild(dots[i]); var svg = layer.querySelector('#routeSvg'); if (svg) layer
+                .removeChild(svg); var sec = layer.querySelector('#directionSectors'); if (sec) layer.removeChild(sec); }
 
         function updateDots() { clearDots(); var layer = $('dotsLayer') || $('planLayer'); var currentMarkers = CURRENT_FLOOR ?
-                (MARKERS[CURRENT_FLOOR] || []) : []; var currentRotation = smoothRotation;
-            drawRoute(currentMarkers, currentRotation); for (var i = 0; i < currentMarkers.length; i++) { var m =
-                    currentMarkers[i]; var d = document.createElement('div');
+                (MARKERS[CURRENT_FLOOR] || []) : []; drawRoute(currentMarkers); for (var i = 0; i < currentMarkers.length; i++) { var
+                    m = currentMarkers[i]; var d = document.createElement('div');
                 d.className = 'dot ' + m.status; if (m.id === ACTIVE) d.className += ' selected'; var sp =
-                    imageToScreenCoords(m.x, m.y, currentRotation);
+                    imageToScreenCoords(m.x, m.y, 0);
                 d.style.left = sp.x + 'px';
                 d.style.top = sp.y + 'px'; var num = document.createElement('span');
                 num.innerHTML = (i + 1);
@@ -3460,7 +3516,7 @@
             updateFloorInfo();
             renderDirectionSectors(); }
 
-        function drawRoute(markers, rotation) { var layer = $('dotsLayer') || $('planLayer'); var old = layer.querySelector(
+        function drawRoute(markers) { var layer = $('dotsLayer') || $('planLayer'); var old = layer.querySelector(
             '#routeSvg'); if (old) old.parentNode.removeChild(old); if (!markers || markers.length < 2) return; var svg =
                 document.createElementNS('http://www.w3.org/2000/svg', 'svg');
             svg.id = 'routeSvg';
@@ -3470,10 +3526,9 @@
             svg.style.width = '100%';
             svg.style.height = '100%';
             svg.style.pointerEvents = 'none';
-            svg.style.zIndex = '5'; var path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); var d = '';
-            var rot = (rotation !== undefined) ? rotation : smoothRotation; for (var i = 0; i < markers.length; i++) { var m =
-                    markers[i]; var sp = imageToScreenCoords(m.x, m.y, rot); if (i === 0) d += 'M ' + sp.x.toFixed(1) +
-                    ' ' + sp.y.toFixed(1);
+            svg.style.zIndex = '5'; var path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); var d = ''; for (
+                var i = 0; i < markers.length; i++) { var m = markers[i]; var sp = imageToScreenCoords(m.x, m.y, 0); if (i ===
+                    0) d += 'M ' + sp.x.toFixed(1) + ' ' + sp.y.toFixed(1);
                 else d += ' L ' + sp.x.toFixed(1) + ' ' + sp.y.toFixed(1); }
             path.setAttribute('d', d);
             path.setAttribute('stroke', 'rgba(255,204,0,0.6)');
@@ -3707,6 +3762,11 @@
                 if (allOverlays[i].id !== 'panel') {
                     allOverlays[i].style.display = 'none';
                 }
+            }
+            var allFixed = document.querySelectorAll(
+                '#batchOptionsOverlay, #planPreviewOverlay, #floorPickerModal, #planAlignPanel, #alignPromptPanel');
+            for (var j = 0; j < allFixed.length; j++) {
+                allFixed[j].style.display = 'none';
             }
 
             CAPTURE_START_TIME = new Date();
@@ -4117,10 +4177,9 @@
             svg.style.height = '100%';
             svg.style.pointerEvents = 'none';
             svg.style.zIndex = '9'; var r = 40 * SCALE; if (r < 20) r = 20; if (r > 80) r = 80; var half = SECTOR_ANGLE /
-            2; for (var i = 0; i < dirs.length; i++) { var m = dirs[i]; var sp = imageToScreenCoords(m.x, m.y); var cx = sp
-                    .x,
-                    cy = sp.y; var ang = (m._live !== undefined) ? m._live : m.direction; if (PLAN_ALIGNED && !OFFLINE_MODE &&
-                    Math.abs(smoothRotation) > 0.1) { ang = ang - smoothRotation; } var g = document.createElementNS(
+            2; for (var i = 0; i < dirs.length; i++) { var m = dirs[i]; var sp = imageToScreenCoords(m.x, m.y, 0); var cx =
+                    sp.x,
+                    cy = sp.y; var ang = (m._live !== undefined) ? m._live : m.direction; var g = document.createElementNS(
                     'http://www.w3.org/2000/svg', 'g');
                 g.setAttribute('transform', 'translate(' + cx.toFixed(1) + ',' + cy.toFixed(1) + ') rotate(' + ang +
                     ')'); var sr = (-90 - half) * Math.PI / 180,
@@ -4575,6 +4634,12 @@
                 updatePowerSaveUI();
                 updateUIForMinimalMode();
                 applyPlanCompassModules();
+                var cx = wrap.clientWidth / 2;
+                var cy = wrap.clientHeight / 2;
+                var dotsLayer = $('dotsLayer');
+                if (dotsLayer) {
+                    dotsLayer.style.transformOrigin = cx + 'px ' + cy + 'px';
+                }
             }, 100);
         };
         $('floorPlanInput').addEventListener('change', function(e) { var tf = this.getAttribute('data-target-floor'); if (tf &&

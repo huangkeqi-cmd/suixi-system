@@ -254,10 +254,6 @@
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9),
-                0 calc(var(--crosshair-length, 24px) * -0.5) 0 0 var(--crosshair-color, #000000),
-                0 calc(var(--crosshair-length, 24px) * 0.5) 0 0 var(--crosshair-color, #000000),
-                0 0 8px 2px rgba(255, 255, 255, 0.3);
         }
         #screenCrosshair::after {
             width: var(--crosshair-length, 24px);
@@ -265,10 +261,9 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9),
-                calc(var(--crosshair-length, 24px) * -0.5) 0 0 0 var(--crosshair-color, #000000),
-                calc(var(--crosshair-length, 24px) * 0.5) 0 0 0 var(--crosshair-color, #000000),
-                0 0 8px 2px rgba(255, 255, 255, 0.3);
+        }
+        #screenCrosshair {
+            filter: drop-shadow(0 0 0 1.5px rgba(255, 255, 255, 0.9)) drop-shadow(0 0 8px rgba(255, 255, 255, 0.3));
         }
         @keyframes crosshair-breathe {
             0%,
@@ -358,8 +353,8 @@
         }
         #compassBtn {
             position: absolute;
-            bottom: calc(16px + env(safe-area-inset-bottom) + var(--compass-btn-size));
-            left: 16px;
+            top: calc(48px + env(safe-area-inset-top) + 8px + var(--compass-btn-size) * 0.25);
+            right: calc(16px + var(--compass-btn-size) * 0.25);
             width: var(--compass-btn-size);
             height: var(--compass-btn-size);
             border-radius: 50%;
@@ -1474,7 +1469,7 @@
     <div id="previewPanel"><div class="previewHeader"><h2>📋 项目预览</h2><div style="display:flex;gap:8px;flex-wrap:wrap;"><button onclick="closePreview()">关闭</button></div></div><div id="previewContent"></div></div>
     <div id="overlay" onclick="hideSharePanel()"></div>
     <div id="sharePanel" class="overlay-panel"><h3>📦 项目打包完成</h3><div id="nativeShareArea" style="display:none;"><div class="native-share-tip" style="margin-bottom:10px;font-size:13px;color:#8e8e93;">iPhone推荐：使用系统分享可直接发送到微信/邮件/保存到文件</div><button class="share-btn share-native" onclick="nativeShare()" style="width:100%;padding:12px;background:#0a84ff;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">点击使用系统分享</button></div><div id="fallbackArea"><div class="download-tip" style="margin-bottom:8px;color:#8e8e93;">压缩包已生成</div><div id="iosTip" class="ios-tip" style="display:none;margin-bottom:8px;color:#ff9500;"></div><div class="file-info" style="margin-bottom:12px;font-size:13px;color:#8e8e93;">文件大小: <span id="zipSize">--</span> MB<br>文件名: <span id="zipName" style="color:#fff;">--</span></div><button class="share-btn share-email" onclick="shareByEmail()" style="width:100%;padding:12px;margin-bottom:8px;background:#0a84ff;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">📧 邮件发送</button><button class="share-btn share-wechat" onclick="shareToWeChat()" style="width:100%;padding:12px;margin-bottom:8px;background:#30d158;color:#000;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">💬 分享到微信</button><button class="share-btn share-copy" onclick="manualSaveFile()" style="width:100%;padding:12px;margin-bottom:8px;background:#5856d6;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">📁 手动保存文件</button></div><div class="feedback-section" style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.1);font-size:12px;color:#8e8e93;text-align:center;"><p>📱 问题反馈 / 技术交流群</p><p>微信号：<strong>amwtuadwe</strong> <button onclick="navigator.clipboard.writeText('amwtuadwe').then(()=>showMsg('微信号已复制')).catch(()=>prompt('手动复制','amwtuadwe'))" style="font-size:11px;padding:3px 8px;border-radius:6px;background:#48484a;color:#fff;border:none;cursor:pointer;">复制</button></p><p>邮箱：<strong>376524686@qq.com</strong><button onclick="navigator.clipboard.writeText('376524686@qq.com').then(()=>showMsg('邮箱已复制')).catch(()=>prompt('手动复制','376524686@qq.com'))" style="font-size:11px;padding:3px 8px;border-radius:6px;background:#48484a;color:#fff;border:none;cursor:pointer;">复制</button></p><p style="font-size:10px;color:#666;">✉️ 添加请备注"随心系统"</p></div><button class="share-btn share-cancel" onclick="hideSharePanel()" style="width:100%;padding:12px;margin-top:8px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;">关闭</button></div>
-    <div id="newProjectPanel" class="overlay-panel"><h2>🏗️ 新建项目</h2><div class="input-group" style="margin-bottom:12px;"><label style="display:block;margin-bottom:6px;color:#8e8e93;">项目名称</label><input type="text" id="newProjName" placeholder="输入项目名称，如：XX商场改造" maxlength="50" style="width:100%;padding:12px;background:#2c2c2e;color:#fff;border:1px solid #38383a;border-radius:8px;font-size:15px;"></div><div class="input-group" style="margin-bottom:12px;"><label style="display:block;margin-bottom:6px;color:#8e8e93;">项目模式</label><div style="display:flex;gap:8px;"><button id="modeMultiFloor" onclick="setProjectMode(false)" style="flex:1;padding:10px;background:#0a84ff;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">多楼层模式</button><button id="modeMinimal" onclick="setProjectMode(true)" style="flex:1;padding:10px;background:#2c2c2e;color:#8e8e93;border:1px solid #38383a;border-radius:8px;font-size:14px;cursor:pointer;">极简模式</button></div><div id="modeDesc" style="font-size:12px;color:#8e8e93;margin-top:6px;">多楼层模式：支持多个楼层和批量导入</div></div><div class="btnRow"><button class="btnCreate" onclick="createNewProject()" style="flex:1;padding:12px;background:#30d158;color:#000;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">创建项目</button><button class="btnCancel" onclick="hideNewProject()" style="flex:1;padding:12px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer;">取消</button></div></div>
+    <div id="newProjectPanel" class="overlay-panel"><h2>🏗️ 新建项目</h2><div class="input-group" style="margin-bottom:12px;"><label style="display:block;margin-bottom:6px;color:#8e8e93;">项目名称</label><input type="text" id="newProjName" placeholder="输入项目名称，如：XX商场改造" maxlength="50" style="width:100%;padding:12px;background:#2c2c2e;color:#fff;border:1px solid #38383a;border-radius:8px;font-size:15px;"></div><div class="input-group" style="margin-bottom:12px;"><label style="display:block;margin-bottom:6px;color:#8e8e93;">项目模式</label><div style="display:flex;gap:8px;"><button id="modeMultiFloor" onclick="setProjectMode('multi')" style="flex:1;padding:10px;background:#0a84ff;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;">多楼层模式</button><button id="modeMinimal" onclick="setProjectMode('minimal')" style="flex:1;padding:10px;background:#2c2c2e;color:#8e8e93;border:1px solid #38383a;border-radius:8px;font-size:14px;cursor:pointer;">极简模式</button><button id="modeCustom" onclick="setProjectMode('custom')" style="flex:1;padding:10px;background:#2c2c2e;color:#8e8e93;border:1px solid #38383a;border-radius:8px;font-size:14px;cursor:pointer;">自定义模式</button></div><div id="modeDesc" style="font-size:12px;color:#8e8e93;margin-top:6px;">多楼层模式：支持多个楼层和批量导入</div><div id="customModules" style="display:none;margin-top:10px;padding:10px;background:#2c2c2e;border-radius:8px;"><strong style="font-size:12px;display:block;margin-bottom:6px;">选择可用模块</strong><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer;"><input type="checkbox" id="modMultiFloor" checked style="width:16px;height:16px;">多楼层管理</label><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer;"><input type="checkbox" id="modBatchImport" checked style="width:16px;height:16px;">批量导入</label><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer;"><input type="checkbox" id="modGyro" checked style="width:16px;height:16px;">陀螺仪/指北针</label><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer;"><input type="checkbox" id="modDirection" checked style="width:16px;height:16px;">视线方向设置</label><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer;"><input type="checkbox" id="modVoice" checked style="width:16px;height:16px;">语音播报</label><label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-bottom:4px;cursor:pointer;"><input type="checkbox" id="modTheme" checked style="width:16px;height:16px;">主题设置</label></div></div><div class="btnRow"><button class="btnCreate" onclick="createNewProject()" style="flex:1;padding:12px;background:#30d158;color:#000;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">创建项目</button><button class="btnCancel" onclick="hideNewProject()" style="flex:1;padding:12px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer;">取消</button></div></div>
     <div id="clearStoragePanel" class="overlay-panel"><h2 style="margin-bottom:20px;color:#ff453a;">⚠️ 清理存储空间</h2><div id="storageInfo" style="background:#2c2c2e;padding:15px;border-radius:10px;margin-bottom:20px;text-align:left;font-size:14px;line-height:1.8;">正在计算存储使用情况...</div><div style="background:#2c1c1c;color:#ff9500;padding:15px;border-radius:10px;margin-bottom:20px;text-align:left;font-size:13px;line-height:1.6;"><strong>⚠️ 警告：</strong><br>清理后所有项目数据将被永久删除，无法恢复！<br>请先确保已导出项目数据。</div><div style="flex-direction:column;gap:12px;display:flex;"><button onclick="exportBeforeClear()" style="padding:14px;background:#0a84ff;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">📤 先导出数据</button><button onclick="doClearStorage()" style="padding:14px;background:#ff453a;color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">🗑️ 确认清理（删除所有）</button><button onclick="hideClearStoragePanel()" style="padding:14px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer;">取消</button></div></div>
     <div id="alignPromptPanel" class="overlay-panel"><h3>🧭 检测到平面图</h3><p style="margin-bottom:12px;color:#8e8e93;line-height:1.6;">是否保持平面方向与<strong>现实平行</strong>？<br>启用后平面图将随手机旋转自动对齐现实方向。</p><button class="btn-yes" onclick="confirmAlignPrompt()" style="width:100%;padding:14px;margin-bottom:8px;background:#30d158;color:#000;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">✅ 是，开始对齐</button><button class="btn-no" onclick="declineAlignPrompt()" style="width:100%;padding:14px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer;">❌ 暂不对齐</button></div>
     <div id="planAlignPanel" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:280;background:rgba(0,0,0,0.45);display:none;flex-direction:column;pointer-events:auto !important;"><div class="align-header" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;padding-top:max(14px,env(safe-area-inset-top,14px));border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);"><h3 id="planAlignTitle" style="font-size:16px;">🧭 指北针对齐</h3><span style="font-size:13px;color:#8e8e93;">方向导航</span></div><div class="align-body" id="planAlignBody" style="flex:1;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;pointer-events:none;"><div id="planAlignLayer" style="position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;transform-origin:center center;"><img id="planAlignImg" src="" alt="平面图" style="display:none;max-width:85%;max-height:60%;object-fit:contain;" onerror="this.style.display='none'"></div><div id="alignCompassOverlay" style="position:absolute;width:260px;height:260px;pointer-events:none;z-index:10;top:42%;left:50%;transform:translate(-50%,-50%);"><div style="position:absolute;top:0;left:0;width:100%;height:100%;border-radius:50%;background:rgba(0,0,0,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:2px solid rgba(255,255,255,0.25);box-shadow:0 4px 24px rgba(0,0,0,0.5);z-index:0;pointer-events:none;"></div><div class="compass-outer-ring" style="position:absolute;top:50%;left:50%;width:88%;height:88%;transform:translate(-50%,-50%);border:2.5px solid rgba(255,255,255,0.85);border-radius:50%;z-index:1;pointer-events:none;"></div><div class="compass-rotator" id="alignCompassRotator" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;position:relative;z-index:2;"><div class="compass-n" style="position:absolute;top:-32px;font-size:22px;font-weight:700;color:#ff453a;letter-spacing:0.5px;text-shadow:0 0 6px rgba(255,69,58,0.6);z-index:3;">N</div><div class="compass-arrow" style="width:100%;height:100%;position:absolute;top:0;left:0;display:flex;align-items:center;justify-content:center;"><div style="width:12.5%;height:85%;background:#ff453a;clip-path:polygon(50% 0%,100% 100%,50% 85%,0% 100%);position:absolute;top:5%;"></div></div></div></div></div><div class="align-footer" style="padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,16px));border-top:1px solid rgba(255,255,255,0.08);text-align:center;background:rgba(0,0,0,0.6);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);pointer-events:auto !important;"><div class="align-instruction" id="planAlignInstruction" style="margin-bottom:12px;font-size:13px;color:#8e8e93;line-height:1.6;">请将手机屏幕上的平面图方向与<strong>现场实际方向</strong>对齐<br>（例如：平面图的上方对应真实世界的北方）</div><button class="btn-align btn-align-primary" id="planAlignBtn" onclick="confirmPlanAlignment()" style="width:100%;padding:14px;margin-bottom:8px;background:#30d158;color:#000;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;pointer-events:auto !important;">我已对齐，锁定方向</button><button class="btn-align btn-align-secondary" onclick="cancelPlanAlignment()" style="width:100%;padding:14px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer;pointer-events:auto !important;">取消</button></div></div>
@@ -2083,6 +2078,102 @@
             updateGyroStatusBadge();
         }
 
+        function initCompassDrag() {
+            var btn = $('compassBtn');
+            if (!btn) return;
+            var longPressTimer = null;
+            var isDraggingCompass = false;
+            var startX = 0, startY = 0;
+            var initialLeft = 0, initialTop = 0;
+            var hasMoved = false;
+            btn.addEventListener('touchstart', function(e) {
+                if (e.touches.length !== 1) return;
+                hasMoved = false;
+                startX = e.touches[0].clientX;
+                startY = e.touches[0].clientY;
+                var rect = btn.getBoundingClientRect();
+                initialLeft = rect.left;
+                initialTop = rect.top;
+                longPressTimer = setTimeout(function() {
+                    isDraggingCompass = true;
+                    btn.style.transition = 'none';
+                    btn.style.cursor = 'grabbing';
+                    showMsg('🧭 拖拽指北针调整位置');
+                }, 600);
+            }, { passive: true });
+            btn.addEventListener('touchmove', function(e) {
+                if (!isDraggingCompass) {
+                    if (longPressTimer && (Math.abs(e.touches[0].clientX - startX) > 10 || Math.abs(e.touches[0].clientY - startY) > 10)) {
+                        clearTimeout(longPressTimer);
+                        longPressTimer = null;
+                    }
+                    return;
+                }
+                e.preventDefault();
+                hasMoved = true;
+                var dx = e.touches[0].clientX - startX;
+                var dy = e.touches[0].clientY - startY;
+                var parent = btn.offsetParent || document.body;
+                var parentRect = parent.getBoundingClientRect();
+                btn.style.left = (initialLeft + dx - parentRect.left) + 'px';
+                btn.style.top = (initialTop + dy - parentRect.top) + 'px';
+                btn.style.right = 'auto';
+                btn.style.bottom = 'auto';
+            }, { passive: false });
+            btn.addEventListener('touchend', function(e) {
+                if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+                if (isDraggingCompass) {
+                    isDraggingCompass = false;
+                    btn.style.transition = 'transform 0.15s';
+                    btn.style.cursor = 'pointer';
+                    if (hasMoved) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                    }
+                }
+            }, { passive: false });
+            btn.addEventListener('mousedown', function(e) {
+                hasMoved = false;
+                startX = e.clientX;
+                startY = e.clientY;
+                var rect = btn.getBoundingClientRect();
+                initialLeft = rect.left;
+                initialTop = rect.top;
+                longPressTimer = setTimeout(function() {
+                    isDraggingCompass = true;
+                    btn.style.transition = 'none';
+                    btn.style.cursor = 'grabbing';
+                    showMsg('🧭 拖拽指北针调整位置');
+                }, 600);
+            });
+            document.addEventListener('mousemove', function(e) {
+                if (!isDraggingCompass) {
+                    if (longPressTimer && (Math.abs(e.clientX - startX) > 10 || Math.abs(e.clientY - startY) > 10)) {
+                        clearTimeout(longPressTimer);
+                        longPressTimer = null;
+                    }
+                    return;
+                }
+                hasMoved = true;
+                var dx = e.clientX - startX;
+                var dy = e.clientY - startY;
+                var parent = btn.offsetParent || document.body;
+                var parentRect = parent.getBoundingClientRect();
+                btn.style.left = (initialLeft + dx - parentRect.left) + 'px';
+                btn.style.top = (initialTop + dy - parentRect.top) + 'px';
+                btn.style.right = 'auto';
+                btn.style.bottom = 'auto';
+            });
+            document.addEventListener('mouseup', function(e) {
+                if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+                if (isDraggingCompass) {
+                    isDraggingCompass = false;
+                    btn.style.transition = 'transform 0.15s';
+                    btn.style.cursor = 'pointer';
+                }
+            });
+        }
+
         function showCompassPanel() {
             exitContinuousMode();
             $('compassStatus').innerHTML = PLAN_ALIGNED && !OFFLINE_MODE ? '✅ 已对齐' : (OFFLINE_MODE ? '📴 离线模式' : '⚠️ 未对齐');
@@ -2100,33 +2191,37 @@
             $('overlay').style.display = 'none';
             $('overlay').onclick = hideSharePanel; }
 
-        var NEW_PROJECT_MINIMAL = false;
+        var NEW_PROJECT_MODE = 'multi';
+        var NEW_PROJECT_MODULES = {};
 
-        function setProjectMode(minimal) {
-            NEW_PROJECT_MINIMAL = minimal;
+        function setProjectMode(mode) {
+            NEW_PROJECT_MODE = mode;
             var btnMulti = $('modeMultiFloor');
             var btnMinimal = $('modeMinimal');
+            var btnCustom = $('modeCustom');
             var desc = $('modeDesc');
-            if (minimal) {
-                btnMulti.style.background = '#2c2c2e';
-                btnMulti.style.color = '#8e8e93';
-                btnMulti.style.border = '1px solid #38383a';
-                btnMulti.style.fontWeight = 'normal';
-                btnMinimal.style.background = '#0a84ff';
-                btnMinimal.style.color = '#fff';
-                btnMinimal.style.border = 'none';
-                btnMinimal.style.fontWeight = '600';
+            var customPanel = $('customModules');
+            var activeStyle = { background: '#0a84ff', color: '#fff', border: 'none', fontWeight: '600' };
+            var inactiveStyle = { background: '#2c2c2e', color: '#8e8e93', border: '1px solid #38383a', fontWeight: 'normal' };
+            function applyStyle(el, s) { el.style.background = s.background; el.style.color = s.color; el.style.border = s.border; el.style.fontWeight = s.fontWeight; }
+            if (mode === 'minimal') {
+                applyStyle(btnMulti, inactiveStyle);
+                applyStyle(btnMinimal, activeStyle);
+                applyStyle(btnCustom, inactiveStyle);
                 desc.innerHTML = '极简模式：仅单楼层，隐藏批导和楼层管理按钮';
+                customPanel.style.display = 'none';
+            } else if (mode === 'custom') {
+                applyStyle(btnMulti, inactiveStyle);
+                applyStyle(btnMinimal, inactiveStyle);
+                applyStyle(btnCustom, activeStyle);
+                desc.innerHTML = '自定义模式：手动勾选需要启用的功能模块';
+                customPanel.style.display = 'block';
             } else {
-                btnMulti.style.background = '#0a84ff';
-                btnMulti.style.color = '#fff';
-                btnMulti.style.border = 'none';
-                btnMulti.style.fontWeight = '600';
-                btnMinimal.style.background = '#2c2c2e';
-                btnMinimal.style.color = '#8e8e93';
-                btnMinimal.style.border = '1px solid #38383a';
-                btnMinimal.style.fontWeight = 'normal';
+                applyStyle(btnMulti, activeStyle);
+                applyStyle(btnMinimal, inactiveStyle);
+                applyStyle(btnCustom, inactiveStyle);
                 desc.innerHTML = '多楼层模式：支持多个楼层和批量导入';
+                customPanel.style.display = 'none';
             }
         }
 
@@ -2138,7 +2233,7 @@
             $('overlay').style.background = 'var(--overlay-bg)';
             $('overlay').onclick = hideNewProject;
             $('newProjName').value = '新项目';
-            setProjectMode(false);
+            setProjectMode('multi');
             $('newProjName').focus();
         }
 
@@ -2195,11 +2290,10 @@
             if (batchBtn) batchBtn.style.display = isMinimal ? 'none' : '';
             if (floorBtn) floorBtn.style.display = isMinimal ? 'none' : '';
             var hasFloors = PROJ && FLOORS.length > 0;
-            var isTopBar = FLOORBAR_POSITION === 'top';
             var floatLabel = $('floorFloatLabel');
             var floatAdd = $('floorFloatAddBtn');
-            if (floatLabel) floatLabel.style.display = (hasFloors && isTopBar) ? 'block' : 'none';
-            if (floatAdd) floatAdd.style.display = (hasFloors && isTopBar) ? 'flex' : 'none';
+            if (floatLabel) floatLabel.style.display = 'none';
+            if (floatAdd) floatAdd.style.display = 'none';
         }
 
         function showClearStoragePanel() {
@@ -2239,8 +2333,29 @@
         function createNewProject() {
             var projName = $('newProjName').value.trim();
             if (!projName) { showMsg('请输入项目名称'); return; }
+            var modules = {
+                multiFloor: true,
+                batchImport: true,
+                gyro: true,
+                direction: true,
+                voice: true,
+                theme: true
+            };
+            if (NEW_PROJECT_MODE === 'minimal') {
+                modules = { multiFloor: false, batchImport: false, gyro: true, direction: true, voice: false, theme: true };
+            } else if (NEW_PROJECT_MODE === 'custom') {
+                modules = {
+                    multiFloor: $('modMultiFloor').checked,
+                    batchImport: $('modBatchImport').checked,
+                    gyro: $('modGyro').checked,
+                    direction: $('modDirection').checked,
+                    voice: $('modVoice').checked,
+                    theme: $('modTheme').checked
+                };
+            }
+            NEW_PROJECT_MODULES = modules;
             PROJ = { name: projName, createdAt: new Date().toISOString(), timeOffset: 0, calibrated: false,
-                minimalMode: NEW_PROJECT_MINIMAL };
+                minimalMode: NEW_PROJECT_MODE === 'minimal', customModules: modules };
             FLOORS = [];
             CURRENT_FLOOR = null;
             MARKERS = {};
@@ -3127,7 +3242,6 @@
             var currentIdx = idx;
             var itemHeight = 36;
             var visibleCount = 7;
-            var centerY = container.clientHeight / 2;
             var startY = 0,
                 startX = 0,
                 isDraggingPicker = false;
@@ -3155,6 +3269,7 @@
                 wheel.innerHTML = '';
                 itemEls = [];
                 var visible = getVisibleItems();
+                var centerY = container.clientHeight / 2;
                 visible.forEach(function(item) {
                     var el = document.createElement('div');
                     var absOffset = Math.abs(item.offset);
@@ -3217,8 +3332,8 @@
                 if (dt > 0) { velocity = (y - lastY) / itemHeight / dt * 16; }
                 lastY = y;
                 lastTime = now;
-                // 垂直滑动：逆序逻辑——手指下滑（dy>0）楼层越高（currentIdx增加）
-                var pixelOffset = dy;
+                // 垂直滑动：顺序逻辑——手指上滑（dy<0）楼层越高（currentIdx增加）
+                var pixelOffset = -dy;
                 itemEls.forEach(function(el, i) {
                     var visible = getVisibleItems();
                     var item = visible[i];
@@ -3828,7 +3943,7 @@
             }
             
             // 如果有待完成的拍摄且没有点击在点位上，提示用户但不阻止其他操作
-            if (IS_IOS && PHONE_CAMERA_MODE && PENDING_MARKER_ID) { 
+            if (PHONE_CAMERA_MODE && PENDING_MARKER_ID) { 
                 // 如果没有点击在点位上，则显示提示
                 if (!hit) {
                     showMsg('请先点击"我已拍完"完成当前点位，或点击其他点位');
@@ -3899,13 +4014,15 @@
             updateCaptureButtonState();
             setDirMode(DIRECTION_MODE);
 
-            // 本机拍摄模式：保持展开，方便点击按钮
             if (PHONE_CAMERA_MODE) {
+                // 本机拍摄模式：展开面板，方便用户点击功能按钮
                 p.classList.remove('minimized');
                 PANEL_MINIMIZED = false;
                 var minBtn = $('panelMinimizeBtn');
                 if (minBtn) minBtn.innerHTML = '最小化';
-                setTimeout(function() { openPhoneCamera(); }, 300);
+                if (IS_IOS) {
+                    setTimeout(function() { openPhoneCamera(); }, 300);
+                }
             } else {
                 // 外设模式：保持用户之前选择的状态，不强制改变
                 if (PANEL_MINIMIZED) {
@@ -4862,6 +4979,7 @@
             list.innerHTML = '';
             order.forEach(function(label, idx) {
                 var item = document.createElement('div');
+                item.className = 'topbar-order-item';
                 item.setAttribute('data-idx', idx);
                 item.style.cssText =
                     'display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin-bottom:4px;background:var(--surface2);border-radius:8px;cursor:grab;user-select:none;touch-action:none;pointer-events:auto!important;';
@@ -4978,6 +5096,7 @@
             $('floorPanel').style.display = 'none';
             $('compassPanel').style.display = 'none';
             $('themePanel').style.display = 'none';
+            initCompassDrag();
             $('voiceSettingsPanel').style.display = 'none';
             $('captureSettingsPanel').style.display = 'none';
             $('editPanel').style.display = 'none';

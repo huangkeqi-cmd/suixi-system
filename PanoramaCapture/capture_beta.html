@@ -162,12 +162,18 @@
             gap: 6px;
             overflow-x: auto;
             overflow-y: hidden;
-            padding-bottom: 4px;
+            padding: 6px 8px;
             scrollbar-width: none;
             -ms-overflow-style: none;
             flex-wrap: nowrap;
             align-items: center;
             pointer-events: auto;
+            background: rgba(0,0,0,0.65);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border-radius: 12px;
+            margin: 2px 0;
+            box-sizing: border-box;
         }
         #topBarFloorRow::-webkit-scrollbar {
             display: none;
@@ -352,8 +358,8 @@
         }
         #compassBtn {
             position: absolute;
-            top: calc(48px + env(safe-area-inset-top) + 8px);
-            right: 16px;
+            bottom: calc(16px + env(safe-area-inset-bottom) + var(--compass-btn-size));
+            left: 16px;
             width: var(--compass-btn-size);
             height: var(--compass-btn-size);
             border-radius: 50%;
@@ -528,8 +534,8 @@
         }
         #floorFloatLabel {
             position: fixed;
-            top: 16px;
-            left: 16px;
+            top: calc(52px + env(safe-area-inset-top, 0px));
+            left: 12px;
             z-index: 55;
             background: rgba(0, 0, 0, 0.55);
             backdrop-filter: blur(8px);
@@ -554,8 +560,8 @@
         }
         #floorFloatAddBtn {
             position: fixed;
-            top: 16px;
-            left: 80px;
+            top: calc(52px + env(safe-area-inset-top, 0px));
+            left: 76px;
             z-index: 55;
             width: 34px;
             height: 34px;
@@ -581,7 +587,7 @@
             bottom: 0;
             left: 0;
             right: 0;
-            z-index: 200;
+            z-index: 300;
             background: rgba(28, 28, 30, var(--panel-opacity));
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
@@ -973,7 +979,7 @@
             bottom: 0;
             left: 0;
             right: 0;
-            z-index: 200;
+            z-index: 300;
             background: rgba(28, 28, 30, var(--panel-opacity));
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
@@ -1455,11 +1461,13 @@
         <div style="display:flex;gap:10px;"><button onclick="testCapture()" style="flex:1;padding:12px;background:#ff9500;color:#000;border:none;border-radius:10px;font-size:15px;font-weight:600;">📷 试拍</button><button onclick="saveCaptureSettings()" style="flex:1;padding:12px;background:#30d158;color:#000;border:none;border-radius:10px;font-size:15px;font-weight:600;">保存</button><button onclick="hideCaptureSettings()" style="flex:1;padding:12px;background:#48484a;color:#fff;border:none;border-radius:10px;font-size:15px;">取消</button></div>
     </div>
     <div id="editPanel"><h3>🔧 编辑点位</h3><div class="btnRow"><button class="btnMove" onclick="startMove()">移动位置</button><button class="btnDel" onclick="doDelete()">删除点位</button></div><div class="hint" id="editHint">点击"移动位置"后，拖拽点位到新位置</div><div class="btnRow"><button class="btnCancel" onclick="cancelEdit()" style="flex:0.5">取消</button><button class="btnCancel" onclick="confirmMove()" id="btnConfirmMove" style="display:none;flex:0.5;background:#30d158;color:#000;">确认位置</button></div></div>
-    <div id="floorPanel" class="overlay-panel">
-        <h3>🏢 楼层管理</h3>
-        <div class="quickAdd"><h4>⚡ 快速添加</h4><div class="btnGroup" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;"><button class="btnAdd" onclick="quickAddFloor(1)" style="flex:1;padding:8px;border-radius:8px;background:#30d158;color:#000;border:none;cursor:pointer;font-weight:600;">+1层</button><button class="btnAddMulti" onclick="quickAddFloor(5)" style="flex:1;padding:8px;border-radius:8px;background:#0a84ff;color:#fff;border:none;cursor:pointer;font-weight:600;">+5层</button><button class="btnBasement" onclick="quickAddBasement()" style="flex:1;padding:8px;border-radius:8px;background:#ff9500;color:#000;border:none;cursor:pointer;font-weight:600;">+B1</button><button class="btnRoof" onclick="quickAddRoof()" style="flex:1;padding:8px;border-radius:8px;background:#ff453a;color:#fff;border:none;cursor:pointer;font-weight:600;">+RF</button><button class="btnAdd" onclick="quickAddCustom()" style="flex:1;padding:8px;border-radius:8px;background:#5856d6;color:#fff;border:none;cursor:pointer;font-weight:600;">自定义</button></div><div class="btnGroup" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;"><button class="btnAddMulti" onclick="autoSortFloors()" style="flex:1;padding:8px;border-radius:8px;background:#5856d6;color:#fff;border:none;cursor:pointer;font-weight:600;">🔃 自动排序楼层</button><button class="btnBasement" onclick="toggleFloorBarPosition()" id="btnToggleSide" style="flex:1;padding:8px;border-radius:8px;background:#48484a;color:#fff;border:none;cursor:pointer;font-weight:600;">↔️ 切换位置</button></div></div>
-        <div class="floorList" id="floorList" style="max-height:250px;overflow-y:auto;scrollbar-width:none;"></div>
-        <div class="btnRow"><button class="btnSave" onclick="saveFloors()">保存</button><button class="btnCancel" onclick="cancelFloors()">取消</button></div>
+    <div id="floorPanel" class="overlay-panel" style="display:none;max-height:92vh;width:95%;max-width:460px;padding:0;overflow:hidden;flex-direction:column;">
+        <div style="padding:16px 16px 8px;flex-shrink:0;"><h3>🏢 楼层管理</h3></div>
+        <div class="floorList" id="floorList" style="flex:1;overflow-y:auto;scrollbar-width:none;padding:0 16px;min-height:0;"></div>
+        <div style="padding:8px 16px 16px;flex-shrink:0;background:var(--surface);border-top:1px solid var(--border-medium);">
+            <div class="quickAdd"><h4 style="margin:4px 0 6px;font-size:12px;color:var(--text2);">⚡ 快速添加</h4><div class="btnGroup" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;"><button class="btnAdd" onclick="quickAddFloor(1)" style="flex:1;padding:8px;border-radius:8px;background:#30d158;color:#000;border:none;cursor:pointer;font-weight:600;font-size:13px;">+1层</button><button class="btnAddMulti" onclick="quickAddFloor(5)" style="flex:1;padding:8px;border-radius:8px;background:#0a84ff;color:#fff;border:none;cursor:pointer;font-weight:600;font-size:13px;">+5层</button><button class="btnBasement" onclick="quickAddBasement()" style="flex:1;padding:8px;border-radius:8px;background:#ff9500;color:#000;border:none;cursor:pointer;font-weight:600;font-size:13px;">+B1</button><button class="btnRoof" onclick="quickAddRoof()" style="flex:1;padding:8px;border-radius:8px;background:#ff453a;color:#fff;border:none;cursor:pointer;font-weight:600;font-size:13px;">+RF</button><button class="btnAdd" onclick="quickAddCustom()" style="flex:1;padding:8px;border-radius:8px;background:#5856d6;color:#fff;border:none;cursor:pointer;font-weight:600;font-size:13px;">自定义</button></div><div class="btnGroup" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;"><button class="btnAddMulti" onclick="autoSortFloors()" style="flex:1;padding:8px;border-radius:8px;background:#5856d6;color:#fff;border:none;cursor:pointer;font-weight:600;font-size:13px;">🔃 自动排序</button><button class="btnBasement" onclick="toggleFloorBarPosition()" id="btnToggleSide" style="flex:1;padding:8px;border-radius:8px;background:#48484a;color:#fff;border:none;cursor:pointer;font-weight:600;font-size:13px;">↔️ 切换位置</button></div></div>
+            <div class="btnRow" style="margin-top:8px;"><button class="btnSave" onclick="saveFloors()" style="flex:1;">保存</button><button class="btnCancel" onclick="cancelFloors()" style="flex:1;">取消</button></div>
+        </div>
     </div>
     <div id="rotatePanel" class="overlay-panel"><h3>🔄 调整图片方向</h3><div class="rotatePreview" style="text-align:center;margin-bottom:12px;"><img id="rotatePreviewImg" src="" alt="预览" style="max-width:100%;max-height:200px;object-fit:contain;"></div><div class="rotateControls" style="display:flex;gap:10px;margin-bottom:12px;"><button onclick="rotateImage(-90)" style="flex:1;padding:10px;border-radius:10px;background:#ff9500;color:#000;border:none;cursor:pointer;font-weight:600;">↺ 逆时针90°</button><button onclick="rotateImage(90)" style="flex:1;padding:10px;border-radius:10px;background:#ff9500;color:#000;border:none;cursor:pointer;font-weight:600;">↻ 顺时针90°</button></div><div class="btnRow"><button class="btnCancel" onclick="cancelRotate()">取消</button><button class="btnSave" onclick="confirmRotate()">确认导入</button></div></div>
     <div id="importChoicePanel" class="overlay-panel"><h3>📷 导入平面图</h3><div class="importPreview" style="text-align:center;margin-bottom:12px;"><img id="importPreviewImg" src="" alt="预览" style="max-width:100%;max-height:200px;object-fit:contain;"></div><div class="importChoices" style="display:flex;gap:10px;margin-bottom:12px;"><button class="btnDirect" onclick="directImport()" style="flex:1;padding:12px;border-radius:10px;background:#30d158;color:#000;border:none;cursor:pointer;font-weight:600;">✓ 直接导入</button><button class="btnRotate" onclick="enterRotateMode()" style="flex:1;padding:12px;border-radius:10px;background:#ff9500;color:#000;border:none;cursor:pointer;font-weight:600;">🔄 需要旋转</button></div><div class="btnRow"><button class="btnCancel" onclick="cancelImportChoice()">取消</button></div></div>
@@ -2190,8 +2198,8 @@
             var isTopBar = FLOORBAR_POSITION === 'top';
             var floatLabel = $('floorFloatLabel');
             var floatAdd = $('floorFloatAddBtn');
-            if (floatLabel) floatLabel.style.display = (hasFloors && !isTopBar) ? 'block' : 'none';
-            if (floatAdd) floatAdd.style.display = (hasFloors && !isTopBar) ? 'flex' : 'none';
+            if (floatLabel) floatLabel.style.display = (hasFloors && isTopBar) ? 'block' : 'none';
+            if (floatAdd) floatAdd.style.display = (hasFloors && isTopBar) ? 'flex' : 'none';
         }
 
         function showClearStoragePanel() {
@@ -2717,25 +2725,17 @@
             
             // 清除楼层栏的所有位置类
             bar.classList.remove('left-side', 'right-side');
+            // 清理bar中残留的楼层标签（防止切换位置时残留）
+            while (bar.firstChild && bar.firstChild !== addBtn) {
+                bar.removeChild(bar.firstChild);
+            }
             
             if (topRow) {
                 topRow.innerHTML = '';
                 if (FLOORBAR_POSITION === 'top' && hasFloors) {
                     topRow.style.display = 'flex';
-                    topRow.style.background = 'rgba(0,0,0,0.6)';
-                    topRow.style.backdropFilter = 'blur(8px)';
-                    topRow.style.WebkitBackdropFilter = 'blur(8px)';
-                    topRow.style.padding = '8px 14px';
-                    topRow.style.borderRadius = '12px';
-                    topRow.style.margin = '4px 8px';
                 } else {
                     topRow.style.display = 'none';
-                    topRow.style.background = '';
-                    topRow.style.backdropFilter = '';
-                    topRow.style.WebkitBackdropFilter = '';
-                    topRow.style.padding = '';
-                    topRow.style.borderRadius = '';
-                    topRow.style.margin = '';
                 }
             }
             
@@ -2747,9 +2747,6 @@
                     bar.classList.add('left-side');
                 } else if (FLOORBAR_POSITION === 'right') {
                     bar.classList.add('right-side');
-                }
-                while (bar.firstChild && bar.firstChild !== addBtn) {
-                    bar.removeChild(bar.firstChild);
                 }
             }
             var sorted = FLOORS.slice().sort(function(a, b) { return a.order - b.order; });
@@ -2967,7 +2964,8 @@
             if (!PROJ) return;
             floorBackup = JSON.stringify({ floors: FLOORS, currentFloor: CURRENT_FLOOR });
             renderFloorList();
-            $('floorPanel').style.display = 'block';
+            var fp = $('floorPanel');
+            fp.style.display = 'flex';
             $('overlay').style.display = 'block';
             $('overlay').onclick = cancelFloors;
         }
@@ -2998,28 +2996,26 @@
             if (FLOOR_PICKER_EDITING && FLOOR_PICKER_EDITING !== fid) {
                 hideFloorNameEditor();
             }
-            
+
             var floor = FLOORS.find(function(f) { return f.id === fid; });
             if (!floor) return;
-            
+
             FLOOR_PICKER_EDITING = fid;
             nameDisplay.style.display = 'none';
-            
-            // 创建滚轮选择器
+
+            // 显示确认按钮
+            var confirmBtn = document.getElementById('btnConfirm_' + fid);
+            if (confirmBtn) confirmBtn.style.display = 'block';
+
+            // 创建滚轮选择器（选择时仅更新内部状态，不自动保存）
             var picker = createFloorPicker(floor.name, function(newName) {
-                // 检查冲突
-                var conflict = checkFloorNameConflict(fid, newName);
-                if (conflict) {
-                    handleFloorNameConflict(fid, newName, conflict);
-                } else {
-                    renameFloor(fid, newName);
-                    renderFloorBar();
-                }
+                // 仅更新显示，不自动保存
             });
             picker.id = 'floorPicker_' + fid;
             picker.style.flex = '1';
             picker.style.maxWidth = '100px';
             picker.style.height = '110px';
+            picker.dataset.value = floor.name;
             nameDisplay.parentNode.insertBefore(picker, nameDisplay.nextSibling);
         }
         
@@ -3030,10 +3026,30 @@
                 if (oldPicker) oldPicker.remove();
                 var nameDisplay = document.getElementById('floorName_' + FLOOR_PICKER_EDITING);
                 if (nameDisplay) nameDisplay.style.display = 'flex';
+                var confirmBtn = document.getElementById('btnConfirm_' + FLOOR_PICKER_EDITING);
+                if (confirmBtn) confirmBtn.style.display = 'none';
                 FLOOR_PICKER_EDITING = null;
             }
         }
         
+        // 确认楼层重命名
+        function confirmFloorRename(fid) {
+            var picker = document.getElementById('floorPicker_' + fid);
+            if (!picker) return;
+            var newName = picker.dataset.value || '';
+            if (!newName.trim()) return;
+            var conflict = checkFloorNameConflict(fid, newName);
+            if (conflict) {
+                handleFloorNameConflict(fid, newName, conflict);
+            } else {
+                renameFloor(fid, newName.trim());
+                hideFloorNameEditor();
+                renderFloorBar();
+                renderFloorList();
+                showMsg('楼层已重命名为 ' + newName);
+            }
+        }
+
         // 检查楼层名称冲突
         function checkFloorNameConflict(fid, newName) {
             for (var i = 0; i < FLOORS.length; i++) {
@@ -3044,28 +3060,57 @@
             return null;
         }
         
-        // 处理楼层名称冲突
+        // 处理楼层名称冲突（自定义弹窗）
         function handleFloorNameConflict(fid, newName, conflict) {
-            var choice = confirm('楼层名称 "' + newName + '" 已存在！\n\n选择确定：新楼层名增加后缀\n选择取消：已有楼层名增加后缀');
-            
-            if (choice) {
-                // 新楼层名增加后缀
+            var modal = document.createElement('div');
+            modal.id = 'floorConflictModal';
+            modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:500;display:flex;align-items:center;justify-content:center;pointer-events:auto!important;';
+            var content = document.createElement('div');
+            content.style.cssText = 'background:var(--surface);border-radius:16px;padding:20px;width:85%;max-width:340px;pointer-events:auto!important;';
+            content.innerHTML = '<h4 style="margin:0 0 12px;font-size:16px;color:#ff9500;">⚠️ 楼层名称冲突</h4>' +
+                '<p style="font-size:14px;line-height:1.6;margin:0 0 16px;">楼层名称 <strong style="color:#fff;">"' + escapeHtml(newName) + '"</strong> 已存在！<br><br>请选择处理方式：</p>';
+            var btnRow = document.createElement('div');
+            btnRow.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+            var btn1 = document.createElement('button');
+            btn1.innerHTML = '新改名称_后缀';
+            btn1.style.cssText = 'width:100%;padding:12px;border-radius:10px;border:none;background:#0a84ff;color:#fff;font-size:14px;font-weight:600;cursor:pointer;pointer-events:auto!important;';
+            btn1.onclick = function() {
                 var uniqueName = makeFloorPickerUnique(newName, fid);
                 renameFloor(fid, uniqueName);
-            } else {
-                // 已有楼层名增加后缀
+                hideFloorNameEditor();
+                modal.remove();
+                renderFloorBar();
+                renderFloorList();
+            };
+            var btn2 = document.createElement('button');
+            btn2.innerHTML = '已有名称_后缀';
+            btn2.style.cssText = 'width:100%;padding:12px;border-radius:10px;border:none;background:#5856d6;color:#fff;font-size:14px;font-weight:600;cursor:pointer;pointer-events:auto!important;';
+            btn2.onclick = function() {
                 var uniqueConflictName = makeFloorPickerUnique(conflict.name, conflict.id);
                 renameFloor(conflict.id, uniqueConflictName);
                 renameFloor(fid, newName);
-            }
-            renderFloorBar();
-            renderFloorList();
+                hideFloorNameEditor();
+                modal.remove();
+                renderFloorBar();
+                renderFloorList();
+            };
+            var btn3 = document.createElement('button');
+            btn3.innerHTML = '取消';
+            btn3.style.cssText = 'width:100%;padding:12px;border-radius:10px;border:none;background:#48484a;color:#fff;font-size:14px;cursor:pointer;pointer-events:auto!important;';
+            btn3.onclick = function() { modal.remove(); };
+            btnRow.appendChild(btn1);
+            btnRow.appendChild(btn2);
+            btnRow.appendChild(btn3);
+            content.appendChild(btnRow);
+            modal.appendChild(content);
+            modal.onclick = function(ev) { if (ev.target === modal) modal.remove(); };
+            document.body.appendChild(modal);
         }
 
         function createFloorPicker(currentName, onChange) {
             var container = document.createElement('div');
             container.style.cssText =
-                'flex:1;min-width:50px;max-width:100px;height:110px;position:relative;overflow:hidden;border-radius:8px;background:#1c1c1e;border:1px solid #38383a;cursor:pointer;user-select:none;touch-action:none;pointer-events:auto!important;';
+                'flex:1;min-width:50px;max-width:100px;height:140px;position:relative;overflow:hidden;border-radius:8px;background:#1c1c1e;border:1px solid #38383a;cursor:pointer;user-select:none;touch-action:none;pointer-events:auto!important;';
             var wheel = document.createElement('div');
             wheel.style.cssText =
                 'position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden;perspective:300px;pointer-events:none;';
@@ -3081,11 +3126,16 @@
             if (idx < 0) idx = 0;
             var currentIdx = idx;
             var itemHeight = 36;
-            var visibleCount = 5;
+            var visibleCount = 7;
+            var centerY = container.clientHeight / 2;
             var startY = 0,
                 startX = 0,
                 isDraggingPicker = false;
             var itemEls = [];
+            var lastY = 0,
+                lastTime = 0;
+            var velocity = 0;
+            var animating = false;
 
             function getVisibleItems() {
                 var result = [];
@@ -3105,17 +3155,16 @@
                 wheel.innerHTML = '';
                 itemEls = [];
                 var visible = getVisibleItems();
-                var centerY = 55;
                 visible.forEach(function(item) {
                     var el = document.createElement('div');
                     var absOffset = Math.abs(item.offset);
-                    var scale = absOffset === 0 ? 1 : (absOffset === 1 ? 0.85 : 0.7);
-                    var opacity = absOffset === 0 ? 1 : (absOffset === 1 ? 0.6 : 0.3);
+                    var scale = absOffset === 0 ? 1 : (absOffset <= 1 ? 0.88 : (absOffset <= 2 ? 0.75 : 0.6));
+                    var opacity = absOffset === 0 ? 1 : (absOffset <= 1 ? 0.7 : (absOffset <= 2 ? 0.45 : 0.25));
                     var translateY = item.offset * itemHeight;
-                    var rotateX = -item.offset * 15;
+                    var rotateX = -item.offset * 12;
                     el.style.cssText =
                         'position:absolute;left:0;width:100%;height:' + itemHeight + 'px;line-height:' +
-                        itemHeight + 'px;text-align:center;font-size:' + (absOffset === 0 ? '14px' : '12px') +
+                        itemHeight + 'px;text-align:center;font-size:' + (absOffset === 0 ? '15px' : '12px') +
                         ';font-weight:' + (absOffset === 0 ? '700' : '400') + ';color:' + (absOffset === 0 ?
                             '#fff' : '#8e8e93') + ';transform:translateY(' + (centerY + translateY - itemHeight /
                             2) + 'px) scale(' + scale + ') rotateX(' + rotateX +
@@ -3131,50 +3180,162 @@
                 currentIdx = Math.max(0, Math.min(items.length - 1, Math.round(currentIdx)));
                 renderWheel();
                 var newName = makeFloorPickerUnique(items[currentIdx]);
+                container.dataset.value = newName;
                 if (newName !== currentName) {
                     currentName = newName;
                     onChange(newName);
                 }
             }
+
+            function animateWithVelocity() {
+                if (Math.abs(velocity) < 0.05) { snapToNearest(); animating = false; return; }
+                currentIdx += velocity;
+                velocity *= 0.92;
+                renderWheel();
+                requestAnimationFrame(function() { animateWithVelocity(); });
+            }
             renderWheel();
             container.addEventListener('touchstart', function(e) {
                 if (e.touches.length !== 1) return;
+                animating = false;
                 startY = e.touches[0].clientY;
                 startX = e.touches[0].clientX;
+                lastY = startY;
+                lastTime = Date.now();
+                velocity = 0;
                 isDraggingPicker = true;
                 itemEls.forEach(function(el) { el.style.transition = 'none'; });
             }, { passive: true });
             container.addEventListener('touchmove', function(e) {
                 if (!isDraggingPicker) return;
                 var y = e.touches[0].clientY;
+                var x = e.touches[0].clientX;
                 var dy = y - startY;
+                var dx = x - startX;
+                var now = Date.now();
+                var dt = now - lastTime;
+                if (dt > 0) { velocity = (y - lastY) / itemHeight / dt * 16; }
+                lastY = y;
+                lastTime = now;
+                // 垂直滑动：逆序逻辑——手指下滑（dy>0）楼层越高（currentIdx增加）
                 var pixelOffset = dy;
                 itemEls.forEach(function(el, i) {
                     var visible = getVisibleItems();
                     var item = visible[i];
                     if (!item || item.index < 0) return;
                     var absOffset = Math.abs(item.offset + pixelOffset / itemHeight);
-                    var scale = absOffset < 0.5 ? 1 : (absOffset < 1.5 ? 0.85 : 0.7);
-                    var opacity = absOffset < 0.5 ? 1 : (absOffset < 1.5 ? 0.6 : 0.3);
+                    var scale = absOffset < 0.5 ? 1 : (absOffset < 1.5 ? 0.88 : (absOffset < 2.5 ? 0.75 : 0.6));
+                    var opacity = absOffset < 0.5 ? 1 : (absOffset < 1.5 ? 0.7 : (absOffset < 2.5 ? 0.45 : 0.25));
                     var translateY = (item.offset + pixelOffset / itemHeight) * itemHeight;
-                    var rotateX = -(item.offset + pixelOffset / itemHeight) * 15;
-                    var centerY = 55;
+                    var rotateX = -(item.offset + pixelOffset / itemHeight) * 12;
                     el.style.transform = 'translateY(' + (centerY + translateY - itemHeight / 2) +
                         'px) scale(' + scale + ') rotateX(' + rotateX + 'deg)';
                     el.style.opacity = opacity;
-                    el.style.fontSize = absOffset < 0.5 ? '14px' : '12px';
+                    el.style.fontSize = absOffset < 0.5 ? '15px' : '12px';
                     el.style.fontWeight = absOffset < 0.5 ? '700' : '400';
                     el.style.color = absOffset < 0.5 ? '#fff' : '#8e8e93';
                 });
-            }, { passive: true });
+                // 阻止水平滑动触发页面后退（当滚轮处于编辑状态时）
+                if (FLOOR_PICKER_EDITING && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 10) {
+                    e.preventDefault ? e.preventDefault() : (e.returnValue = false);
+                }
+            }, { passive: false });
             container.addEventListener('touchend', function(e) {
                 if (!isDraggingPicker) return;
                 isDraggingPicker = false;
-                var dy = (e.changedTouches[0] ? e.changedTouches[0].clientY : startY) - startY;
+                var y = e.changedTouches[0] ? e.changedTouches[0].clientY : startY;
+                var x = e.changedTouches[0] ? e.changedTouches[0].clientX : startX;
+                var dy = y - startY;
+                var dx = x - startX;
+                // 水平滑动检测
+                if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 30) {
+                    if (dx < 0) {
+                        // 左滑：切换到特色楼层
+                        showSpecialFloorPicker();
+                        return;
+                    } else {
+                        // 右滑：手动输入
+                        showManualFloorInput();
+                        return;
+                    }
+                }
+                // 惯性滚动
+                if (Math.abs(velocity) > 0.3) {
+                    animating = true;
+                    animateWithVelocity();
+                    return;
+                }
                 var itemOffset = dy / itemHeight;
-                currentIdx = Math.max(0, Math.min(items.length - 1, currentIdx - Math.round(itemOffset)));
+                // 逆序：手指下滑（dy>0）时currentIdx增加
+                currentIdx = Math.max(0, Math.min(items.length - 1, currentIdx + Math.round(itemOffset)));
                 snapToNearest();
             }, { passive: true });
+
+            // 特色楼层选择
+            function showSpecialFloorPicker() {
+                var specialItems = FLOOR_PICKER_SPECIAL.slice();
+                var modal = document.createElement('div');
+                modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:500;display:flex;align-items:center;justify-content:center;pointer-events:auto!important;';
+                var content = document.createElement('div');
+                content.style.cssText = 'background:var(--surface);border-radius:16px;padding:16px;width:85%;max-width:320px;max-height:70vh;overflow-y:auto;pointer-events:auto!important;';
+                content.innerHTML = '<h4 style="margin:0 0 12px;font-size:15px;">选择特色楼层</h4>';
+                specialItems.forEach(function(name) {
+                    var btn = document.createElement('button');
+                    btn.innerHTML = name;
+                    btn.style.cssText = 'width:100%;padding:12px;margin-bottom:6px;border-radius:10px;border:none;background:var(--surface2);color:#fff;font-size:14px;cursor:pointer;pointer-events:auto!important;';
+                    btn.onclick = function() {
+                        var newName = makeFloorPickerUnique(name);
+                        currentName = newName;
+                        onChange(newName);
+                        modal.remove();
+                    };
+                    content.appendChild(btn);
+                });
+                var cancelBtn = document.createElement('button');
+                cancelBtn.innerHTML = '取消';
+                cancelBtn.style.cssText = 'width:100%;padding:12px;margin-top:4px;border-radius:10px;border:none;background:#48484a;color:#fff;font-size:14px;cursor:pointer;pointer-events:auto!important;';
+                cancelBtn.onclick = function() { modal.remove(); };
+                content.appendChild(cancelBtn);
+                modal.appendChild(content);
+                modal.onclick = function(ev) { if (ev.target === modal) modal.remove(); };
+                document.body.appendChild(modal);
+            }
+
+            // 手动输入楼层名
+            function showManualFloorInput() {
+                var modal = document.createElement('div');
+                modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:500;display:flex;align-items:center;justify-content:center;pointer-events:auto!important;';
+                var content = document.createElement('div');
+                content.style.cssText = 'background:var(--surface);border-radius:16px;padding:16px;width:85%;max-width:320px;pointer-events:auto!important;';
+                content.innerHTML = '<h4 style="margin:0 0 12px;font-size:15px;">手动输入楼层名称</h4>' +
+                    '<input type="text" id="manualFloorInput" placeholder="例如：3F / B2 / 设备层" style="width:100%;padding:12px;background:#2c2c2e;color:#fff;border:1px solid #38383a;border-radius:10px;font-size:15px;margin-bottom:12px;box-sizing:border-box;pointer-events:auto!important;">';
+                var btnRow = document.createElement('div');
+                btnRow.style.cssText = 'display:flex;gap:8px;';
+                var okBtn = document.createElement('button');
+                okBtn.innerHTML = '确定';
+                okBtn.style.cssText = 'flex:1;padding:12px;border-radius:10px;border:none;background:#30d158;color:#000;font-size:14px;font-weight:600;cursor:pointer;pointer-events:auto!important;';
+                okBtn.onclick = function() {
+                    var val = document.getElementById('manualFloorInput').value.trim();
+                    if (val) {
+                        var newName = makeFloorPickerUnique(val);
+                        currentName = newName;
+                        onChange(newName);
+                    }
+                    modal.remove();
+                };
+                var cancelBtn = document.createElement('button');
+                cancelBtn.innerHTML = '取消';
+                cancelBtn.style.cssText = 'flex:1;padding:12px;border-radius:10px;border:none;background:#48484a;color:#fff;font-size:14px;cursor:pointer;pointer-events:auto!important;';
+                cancelBtn.onclick = function() { modal.remove(); };
+                btnRow.appendChild(okBtn);
+                btnRow.appendChild(cancelBtn);
+                content.appendChild(btnRow);
+                modal.appendChild(content);
+                modal.onclick = function(ev) { if (ev.target === modal) modal.remove(); };
+                document.body.appendChild(modal);
+                setTimeout(function() { var inp = document.getElementById('manualFloorInput'); if (inp) inp.focus(); }, 100);
+            }
+
             return container;
         }
 
@@ -3233,6 +3394,13 @@
                     'padding:6px 8px;border-radius:6px;border:none;cursor:pointer;font-size:13px;background:#ff453a;color:#fff;flex-shrink:0;pointer-events:auto!important;';
                 db.onclick = (function(fid) { return function() { deleteFloorFromPanel(fid); }; })(f.id);
                 item.appendChild(db);
+                var cb = document.createElement('button');
+                cb.id = 'btnConfirm_' + f.id;
+                cb.innerHTML = '确认';
+                cb.style.cssText =
+                    'padding:6px 8px;border-radius:6px;border:none;cursor:pointer;font-size:13px;background:#30d158;color:#000;flex-shrink:0;pointer-events:auto!important;display:none;';
+                cb.onclick = (function(fid) { return function() { confirmFloorRename(fid); }; })(f.id);
+                item.appendChild(cb);
                 list.appendChild(item);
             }
         }
@@ -3660,8 +3828,11 @@
             }
             
             // 如果有待完成的拍摄且没有点击在点位上，提示用户但不阻止其他操作
-            if (IS_IOS && PHONE_CAMERA_MODE && PENDING_MARKER_ID && !hit) { 
-                showMsg('请先点击"我已拍完"完成当前点位，或点击其他点位');
+            if (IS_IOS && PHONE_CAMERA_MODE && PENDING_MARKER_ID) { 
+                // 如果没有点击在点位上，则显示提示
+                if (!hit) {
+                    showMsg('请先点击"我已拍完"完成当前点位，或点击其他点位');
+                }
                 return; 
             }
             
@@ -3720,23 +3891,34 @@
         function showCapturePanel() {
             CAPTURE_START_TIME = new Date();
             PENDING_MARKER_ID = ACTIVE;
-            if (!PHONE_CAMERA_MODE && CONTINUOUS_MODE) { var p = $('panel');
-                p.style.display = 'block';
-                p.classList.add('minimized');
-                PANEL_MINIMIZED = true; var minBtn = $('panelMinimizeBtn'); if (minBtn) minBtn.innerHTML = '最大化';
-                updateCaptureButtonState(); return; }
             var p = $('panel');
             p.style.display = 'block';
-            p.classList.remove('minimized');
-            PANEL_MINIMIZED = false;
-            var minBtn = $('panelMinimizeBtn');
-            if (minBtn) minBtn.innerHTML = '最小化';
             $('editPanel').style.display = 'none';
             updatePanelButtons();
             updateSaveAlbumButton();
             updateCaptureButtonState();
             setDirMode(DIRECTION_MODE);
-            if (PHONE_CAMERA_MODE) { setTimeout(function() { openPhoneCamera(); }, 300); } else { speak(VOICE_TEXT); }
+
+            // 本机拍摄模式：保持展开，方便点击按钮
+            if (PHONE_CAMERA_MODE) {
+                p.classList.remove('minimized');
+                PANEL_MINIMIZED = false;
+                var minBtn = $('panelMinimizeBtn');
+                if (minBtn) minBtn.innerHTML = '最小化';
+                setTimeout(function() { openPhoneCamera(); }, 300);
+            } else {
+                // 外设模式：保持用户之前选择的状态，不强制改变
+                if (PANEL_MINIMIZED) {
+                    p.classList.add('minimized');
+                    var minBtn = $('panelMinimizeBtn');
+                    if (minBtn) minBtn.innerHTML = '最大化';
+                } else {
+                    p.classList.remove('minimized');
+                    var minBtn = $('panelMinimizeBtn');
+                    if (minBtn) minBtn.innerHTML = '最小化';
+                }
+                speak(VOICE_TEXT);
+            }
         }
 
         function togglePanelMinimize() { var p = $('panel'); var btn = $('panelMinimizeBtn'); if (p.classList.contains(

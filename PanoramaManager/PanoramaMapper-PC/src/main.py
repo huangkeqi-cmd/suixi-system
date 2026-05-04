@@ -1,13 +1,15 @@
-/**
- * 随心系统 / Suixin System
- * Copyright (c) 2026 huangkeqi
- * 保留所有权利。
- * 
- * 本软件目前为个人工作流工具，开源供学习参考。
- * 项目主页：https://github.com/huangkeqi-cmd/suixi-system
- */
-
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+随心系统 / Suixin System
+Copyright (c) 2026 huangkeqi
+保留所有权利。
+
+本软件目前为个人工作流工具，开源供学习参考。
+项目主页：https://github.com/huangkeqi-cmd/suixi-system
+"""
+
+# 影像管理器主入口
 # -*- coding: utf-8 -*-
 """
 随系 · 影像管理器 - PC 端

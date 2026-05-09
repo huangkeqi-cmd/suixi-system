@@ -37,15 +37,37 @@ enum MarkerStatus: String, Codable {
     case missing = "missing"      // 照片缺失
 }
 
+// MARK: - 楼层模型（兼容 PC 端 schema 4.0）
+struct Floor: Codable {
+    var id: String
+    var name: String
+    var order: Int
+    var hasPlan: Bool
+    var markers: [Marker]
+    
+    init(id: String = UUID().uuidString,
+         name: String = "默认楼层",
+         order: Int = 0,
+         hasPlan: Bool = true,
+         markers: [Marker] = []) {
+        self.id = id
+        self.name = name
+        self.order = order
+        self.hasPlan = hasPlan
+        self.markers = markers
+    }
+}
+
 // MARK: - 项目模型
 struct Project: Codable {
     var schemaVersion: String
     var projectName: String
     var createdAt: String
     var updatedAt: String
-    var floorplan: String
-    var floorplanOriginalName: String
-    var markers: [Marker]
+    var floors: [Floor]           // PC 端 schema 4.0 多楼层
+    var floorplan: String         // 旧版兼容：主平面图文件名
+    var floorplanOriginalName: String // 旧版兼容
+    var markers: [Marker]         // 旧版兼容：单楼层标记点（内部使用）
     
     init(projectName: String,
          floorplan: String,
@@ -57,6 +79,64 @@ struct Project: Codable {
         self.floorplan = floorplan
         self.floorplanOriginalName = floorplanOriginalName
         self.markers = []
+        // 创建默认楼层
+        self.floors = [Floor(id: "default_floor", name: "默认楼层", order: 0, hasPlan: true, markers: [])]
+    }
+    
+    // 自定义编码：导出时同步 markers 到 floors，确保 PC 端兼容
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(projectName, forKey: .projectName)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(floorplan, forKey: .floorplan)
+        try container.encode(floorplanOriginalName, forKey: .floorplanOriginalName)
+        try container.encode(markers, forKey: .markers)
+        
+        // 生成 floors 数组供 PC 端读取
+        var exportFloors = floors
+        if let firstFloor = exportFloors.first {
+            var updatedFloor = firstFloor
+            updatedFloor.markers = markers
+            updatedFloor.hasPlan = !floorplan.isEmpty
+            exportFloors[0] = updatedFloor
+        } else {
+            exportFloors = [Floor(id: "default_floor", name: "默认楼层", order: 0,
+                                  hasPlan: !floorplan.isEmpty, markers: markers)]
+        }
+        try container.encode(exportFloors, forKey: .floors)
+    }
+    
+    // 自定义解码：兼容旧版无 floors 字段的数据
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decode(String.self, forKey: .schemaVersion)
+        self.projectName = try container.decode(String.self, forKey: .projectName)
+        self.createdAt = try container.decode(String.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(String.self, forKey: .updatedAt)
+        self.floorplan = try container.decodeIfPresent(String.self, forKey: .floorplan) ?? ""
+        self.floorplanOriginalName = try container.decodeIfPresent(String.self, forKey: .floorplanOriginalName) ?? ""
+        self.markers = try container.decodeIfPresent([Marker].self, forKey: .markers) ?? []
+        
+        // 如果有 floors 字段，从 floors 恢复 markers
+        if let decodedFloors = try container.decodeIfPresent([Floor].self, forKey: .floors),
+           !decodedFloors.isEmpty {
+            self.floors = decodedFloors
+            // 同步第一个楼层的 markers 到单楼层 markers（iOS 端内部使用）
+            if let firstMarkers = decodedFloors.first?.markers {
+                self.markers = firstMarkers
+            }
+        } else {
+            // 旧版数据：创建默认楼层
+            self.floors = [Floor(id: "legacy_floor", name: "默认楼层", order: 0,
+                                 hasPlan: !self.floorplan.isEmpty, markers: self.markers)]
+        }
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, projectName, createdAt, updatedAt
+        case floors, floorplan, floorplanOriginalName, markers
     }
 }
 

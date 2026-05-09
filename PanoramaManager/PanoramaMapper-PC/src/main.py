@@ -21,6 +21,7 @@ PanoramaManager PC Application
 
 import sys
 import os
+import re
 import json
 import zipfile
 import shutil
@@ -30,7 +31,7 @@ import tempfile
 import urllib.parse
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional, List, Dict, Tuple
 from http.server import HTTPServer, SimpleHTTPRequestHandler, BaseHTTPRequestHandler
 import ssl
@@ -75,6 +76,7 @@ class Marker:
     endTime: str = ""    # 采集结束时间
     panoramaPath: str = ""
     originalPhotoPath: str = ""  # 原始照片绝对路径（不复制照片时使用）
+    photos: List[str] = field(default_factory=list)  # 关联的多张照片路径列表
     
     def to_dict(self) -> dict:
         return asdict(self)
@@ -187,7 +189,17 @@ class Project:
         return cls(**data)
     
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        # 清理空的旧版兼容字段，减少数据冗余
+        # 当 floors 存在且有内容时，移除旧的单楼层空字段
+        if data.get('floors') and len(data['floors']) > 0:
+            if not data.get('floorplan'):
+                data.pop('floorplan', None)
+            if not data.get('floorplanOriginalName'):
+                data.pop('floorplanOriginalName', None)
+            if not data.get('markers'):
+                data.pop('markers', None)
+        return data
 
 
 # =============================================================================
@@ -200,11 +212,12 @@ class HttpServerThread(QThread):
     server_stopped = pyqtSignal()
     error_occurred = pyqtSignal(str)
     
-    def __init__(self, viewer_dir: str, port: int = 0, use_https: bool = False):
+    def __init__(self, viewer_dir: str, port: int = 0, use_https: bool = False, photo_base_dir: str = ""):
         super().__init__()
         self.viewer_dir = viewer_dir
         self.port = port
         self.use_https = use_https
+        self.photo_base_dir = photo_base_dir
         self.server = None
         self.redirect_server = None
         self.is_running = False
@@ -213,6 +226,7 @@ class HttpServerThread(QThread):
         try:
             # 创建自定义 Handler，指定根目录
             viewer_dir = self.viewer_dir
+            photo_base_dir = self.photo_base_dir
             
             class CustomHandler(SimpleHTTPRequestHandler):
                 def translate_path(self, path):
@@ -233,6 +247,19 @@ class HttpServerThread(QThread):
                     # 去除开头的 /
                     if path.startswith('/'):
                         path = path[1:]
+                    
+                    # 处理 external_photos/ 前缀：直接映射到 photo_base_dir，绕过 junction
+                    if photo_base_dir and path.startswith('external_photos/'):
+                        sub_path = path[len('external_photos/'):]
+                        words = sub_path.split('/')
+                        words = filter(None, words)
+                        result_path = photo_base_dir
+                        for word in words:
+                            if os.path.dirname(word) or word in (os.curdir, os.pardir):
+                                continue
+                            result_path = os.path.join(result_path, word)
+                        print(f"[HTTP] {original_path} -> {result_path} (via photo_base_dir)")
+                        return result_path
                     
                     # 使用 posixpath 处理 URL 路径
                     words = path.split('/')
@@ -257,6 +284,38 @@ class HttpServerThread(QThread):
                 def do_GET(self):
                     print(f"[HTTP] GET {self.path}")
                     return super().do_GET()
+                
+                def end_headers(self):
+                    # 添加 CORS 头，解决浏览器安全策略问题
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+                    self.send_header('Access-Control-Allow-Headers', '*')
+                    # 添加缓存控制头，防止浏览器缓存 viewer 文件
+                    # 解决新旧版本切换时的缓存冲突问题
+                    self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                    self.send_header('Pragma', 'no-cache')
+                    self.send_header('Expires', '0')
+                    super().end_headers()
+                
+                def do_OPTIONS(self):
+                    # 处理 CORS 预检请求
+                    self.send_response(200)
+                    self.end_headers()
+                
+                def guess_type(self, path):
+                    # 确保 .JPG/.jpg 正确返回 image/jpeg
+                    _type = super().guess_type(path)
+                    if _type is None:
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in ('.jpg', '.jpeg'):
+                            return 'image/jpeg'
+                        if ext == '.png':
+                            return 'image/png'
+                        if ext == '.gif':
+                            return 'image/gif'
+                        if ext == '.webp':
+                            return 'image/webp'
+                    return _type
                 
                 def log_message(self, format, *args):
                     print(f"[HTTP] {format % args}")
@@ -323,8 +382,12 @@ class HttpServerThread(QThread):
             import traceback
             traceback.print_exc()
             self.error_occurred.emit(str(e))
+        finally:
+            self.is_running = False
+            print("[调试] 服务器线程已退出")
     
     def stop(self):
+        self.is_running = False
         try:
             if self.server:
                 self.server.shutdown()
@@ -337,10 +400,6 @@ class HttpServerThread(QThread):
                 self.redirect_server.server_close()
         except Exception as e:
             print(f"[调试] 关闭重定向服务器异常: {e}")
-        self.is_running = False
-        # 给线程一些时间自行退出
-        import time
-        time.sleep(0.1)
         self.server_stopped.emit()
     
     @staticmethod
@@ -360,145 +419,78 @@ class HttpServerThread(QThread):
 # =============================================================================
 
 def extract_exif_datetime(image_path: str) -> Optional[datetime]:
-    """从照片 EXIF 数据提取拍摄时间"""
+    """从照片 EXIF 数据提取拍摄时间 - 支持多种 PIL 版本"""
     try:
         img = Image.open(image_path)
-        exif = img._getexif()
+        exif = None
+        
+        # 尝试多种方式获取 EXIF 数据（兼容不同 PIL 版本）
+        try:
+            # PIL 9.0+ 推荐使用 getexif()
+            exif = img.getexif()
+        except AttributeError:
+            try:
+                # 旧版 PIL 使用 _getexif()
+                exif = img._getexif()
+            except AttributeError:
+                pass
+        
         img.close()
         
         if not exif:
+            print(f"[调试] 无 EXIF 数据: {os.path.basename(image_path)}")
             return None
         
-        # 查找 DateTimeOriginal 标签 (36867)
-        for tag_id, value in exif.items():
-            tag = TAGS.get(tag_id, tag_id)
-            if tag == 'DateTimeOriginal':
+        # DateTimeOriginal 标签 ID = 36867 (0x9003)
+        datetime_original_tag = 36867
+        
+        # 尝试获取 DateTimeOriginal
+        value = None
+        if isinstance(exif, dict):
+            # 旧版 _getexif() 返回字典
+            value = exif.get(datetime_original_tag)
+        else:
+            # 新版 getexif() 返回 Exif 对象
+            value = exif.get(datetime_original_tag)
+            # 如果获取不到，尝试遍历
+            if value is None:
+                for tag_id, tag_value in exif.items():
+                    if tag_id == datetime_original_tag:
+                        value = tag_value
+                        break
+        
+        if value:
+            try:
+                # 格式: "2026:04:22 13:30:45"
+                dt = datetime.strptime(str(value), "%Y:%m:%d %H:%M:%S")
+                print(f"[调试] EXIF: {os.path.basename(image_path)} -> {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                return dt
+            except Exception as e:
+                print(f"[调试] 解析EXIF时间失败 '{value}': {e}")
+        else:
+            # 尝试其他时间标签
+            fallback_tags = [306, 36868]  # DateTime, DateTimeDigitized
+            for tag_id in fallback_tags:
                 try:
-                    # 格式: "2026:04:22 13:30:45"
-                    dt = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
-                    print(f"[调试] EXIF: {os.path.basename(image_path)} -> {dt.strftime('%Y-%m-%d %H:%M:%S')} (本地时间)")
-                    return dt
-                except Exception as e:
-                    print(f"[调试] 解析EXIF时间失败 {value}: {e}")
+                    if isinstance(exif, dict):
+                        fb_value = exif.get(tag_id)
+                    else:
+                        fb_value = exif.get(tag_id)
+                    
+                    if fb_value:
+                        dt = datetime.strptime(str(fb_value), "%Y:%m:%d %H:%M:%S")
+                        print(f"[调试] EXIF (fallback): {os.path.basename(image_path)} -> {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+                        return dt
+                except:
                     pass
+            
+            print(f"[调试] 未找到 DateTimeOriginal: {os.path.basename(image_path)}")
+                    
     except Exception as e:
         print(f"[调试] 读取EXIF失败 {os.path.basename(image_path)}: {e}")
-        pass
+        import traceback
+        traceback.print_exc()
     return None
-
-
-class TimeCalibrationDialog(QDialog):
-    """时间校准对话框"""
-    def __init__(self, current_offset: int = 0, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("时间校准")
-        self.setMinimumWidth(400)
-        self.calibrated_offset = current_offset
-        
-        layout = QVBoxLayout(self)
-        
-        # 说明文字
-        info = QLabel("如果照片时间与记录时间有偏差，可以调整校准值。\n"
-                     "校准值 = 手机时间 - 相机时间（秒）")
-        info.setWordWrap(True)
-        layout.addWidget(info)
-        
-        # 当前值显示
-        self.offset_label = QLabel(f"当前校准值: {current_offset} 秒")
-        layout.addWidget(self.offset_label)
-        
-        # 调整滑块 - 扩大到±12小时以应对时区差异
-        slider_layout = QHBoxLayout()
-        slider_layout.addWidget(QLabel("-12h"))
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(-43200, 43200)  # ±12小时
-        self.slider.setValue(max(-43200, min(43200, current_offset)))  # 限制在范围内
-        self.slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.slider.setTickInterval(3600)  # 1小时间隔
-        self.slider.valueChanged.connect(self._on_slider_changed)
-        slider_layout.addWidget(self.slider)
-        slider_layout.addWidget(QLabel("+12h"))
-        layout.addLayout(slider_layout)
-        
-        # 精确输入
-        input_layout = QHBoxLayout()
-        input_layout.addWidget(QLabel("精确值:"))
-        self.spin_box = QSpinBox()
-        self.spin_box.setRange(-86400, 86400)  # ±24小时
-        self.spin_box.setValue(current_offset)
-        self.spin_box.setSuffix(" 秒")
-        self.spin_box.setSingleStep(60)  # 步长60秒
-        self.spin_box.valueChanged.connect(self._on_spin_changed)
-        input_layout.addWidget(self.spin_box)
-        layout.addLayout(input_layout)
-        
-        # 快捷按钮 - 增加小时级调整
-        quick_layout = QHBoxLayout()
-        quick_layout.addWidget(QLabel("快捷调整:"))
-        
-        for label, offset in [("-1h", -3600), ("-10m", -600), ("0", 0), ("+10m", 600), ("+1h", 3600)]:
-            btn = QPushButton(label)
-            btn.clicked.connect(lambda checked, o=offset: self._set_offset(o))
-            quick_layout.addWidget(btn)
-        
-        layout.addLayout(quick_layout)
-        
-        # 说明示例
-        example = QLabel("示例：如果相机时间比手机慢8小时（时区差异），\n"
-                        "校准值应设为 +28800\n"
-                        "校准值 = 手机时间 - 相机时间")
-        example.setStyleSheet("color: #666; font-size: 12px;")
-        layout.addWidget(example)
-        
-        # 按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        
-        ok_btn = QPushButton("确定")
-        ok_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(ok_btn)
-        
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(btn_layout)
-    
-    def _on_slider_changed(self, value):
-        self.spin_box.setValue(value)
-        self.calibrated_offset = value
-        hours = abs(value) // 3600
-        mins = (abs(value) % 3600) // 60
-        secs = abs(value) % 60
-        if hours > 0:
-            time_str = f"{hours}小时{mins}分{secs}秒"
-        elif mins > 0:
-            time_str = f"{mins}分{secs}秒"
-        else:
-            time_str = f"{secs}秒"
-        sign = "+" if value > 0 else "" if value < 0 else ""
-        self.offset_label.setText(f"当前校准值: {sign}{value} 秒 ({sign}{time_str})")
-    
-    def _on_spin_changed(self, value):
-        # 限制 slider 范围，避免超出
-        slider_value = max(-43200, min(43200, value))
-        self.slider.setValue(slider_value)
-        self.calibrated_offset = value
-        hours = abs(value) // 3600
-        mins = (abs(value) % 3600) // 60
-        secs = abs(value) % 60
-        if hours > 0:
-            time_str = f"{hours}小时{mins}分{secs}秒"
-        elif mins > 0:
-            time_str = f"{mins}分{secs}秒"
-        else:
-            time_str = f"{secs}秒"
-        sign = "+" if value > 0 else "" if value < 0 else ""
-        self.offset_label.setText(f"当前校准值: {sign}{value} 秒 ({sign}{time_str})")
-    
-    def _set_offset(self, offset):
-        self.slider.setValue(offset)
-        self.spin_box.setValue(offset)
 
 
 class AutoCalibrationThread(QThread):
@@ -545,14 +537,33 @@ class AutoCalibrationThread(QThread):
                     dt = extract_exif_datetime(self.photo_files[i])
                     if dt:
                         photo_times.append((self.photo_files[i], dt))
-                        print(f"[自动校准] 照片 {os.path.basename(self.photo_files[i])}: {dt}")
+                        print(f"[自动校准] 照片 {os.path.basename(self.photo_files[i])}: EXIF={dt}")
                 except Exception:
                     pass
             
-            print(f"[自动校准] 共 {len(photo_times)} 张照片有 EXIF 时间")
+            # 如果 EXIF 时间不足，fallback 到文件名时间（适配手机本机拍摄）
+            used_filename_fallback = False
+            if len(photo_times) < max(3, len(marker_times) // 2):
+                print(f"[自动校准] EXIF 时间不足({len(photo_times)}个)，尝试从文件名提取...")
+                for i in range(max_photos):
+                    # 跳过已有 EXIF 的照片
+                    if any(self.photo_files[i] == pt[0] for pt in photo_times):
+                        continue
+                    try:
+                        dt = extract_time_from_filename(os.path.basename(self.photo_files[i]))
+                        if dt:
+                            photo_times.append((self.photo_files[i], dt))
+                            print(f"[自动校准] 照片 {os.path.basename(self.photo_files[i])}: 文件名={dt}")
+                            used_filename_fallback = True
+                    except Exception:
+                        pass
+                if used_filename_fallback:
+                    print(f"[自动校准] 文件名提取完成，共 {len(photo_times)} 张照片有时间信息")
+            
+            print(f"[自动校准] 共 {len(photo_times)} 张照片有时间信息")
             
             if not photo_times:
-                print("[自动校准] 警告: 没有照片包含 EXIF 时间信息")
+                print("[自动校准] 警告: 没有照片包含时间信息（EXIF或文件名）")
                 self.calibration_complete.emit(0, 0, 0)
                 return
             
@@ -628,11 +639,127 @@ class AutoCalibrationThread(QThread):
         return matches
 
 
+def extract_time_from_filename(filename: str) -> Optional[datetime]:
+    """从文件名中提取时间，支持多种手机拍摄格式
+    
+    支持格式:
+    - 大疆: CAM_20260428131621_0272_D.JPG
+    - iOS: IMG_1234.jpg, IMG_20260505_103045.jpg, IMG_2026-05-05_10-30-45.jpg
+    - 安卓: 20260505_103045.jpg, DCIM_20260505_103045.jpg
+    - 微信: wx_camera_1234567890123.jpg (毫秒时间戳)
+    - 截图: Screenshot_20260505-103045.jpg, Screenshot_2026-05-05-10-30-45.png
+    - 通用: 20260422183045, 2026-04-22-18-30-45, 2026_04_22_18_30_45
+    - 本机拍摄: 楼层名_点位序号_YYYYMMDD_HHMMSS.jpg (随拍采集端导出)
+    """
+    import re
+    
+    # 移除扩展名
+    name = os.path.splitext(filename)[0]
+    
+    # 模式1: 微信相机格式 wx_camera_1234567890123 (13位毫秒时间戳)
+    match = re.search(r'wx_camera_(\d{13})', name)
+    if match:
+        try:
+            timestamp_ms = int(match.group(1))
+            return datetime.fromtimestamp(timestamp_ms / 1000)
+        except:
+            pass
+    
+    # 模式2: 截图格式 Screenshot_20260505-103045 或 Screenshot_2026-05-05-10-30-45
+    match = re.search(r'Screenshot[_-]?(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})', name, re.IGNORECASE)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+    
+    # 模式3: IMG_前缀格式 IMG_20260505_103045 或 IMG_2026-05-05_10-30-45
+    match = re.search(r'IMG[_-]?(\d{4})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_]?(\d{2})', name, re.IGNORECASE)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+    
+    # 模式4: 大疆格式 CAM_20260428131621_0272_D
+    match = re.search(r'CAM[_-]?(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})', name, re.IGNORECASE)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+    
+    # 模式5: 连续格式 20260422183045 (8位日期+6位时间)
+    match = re.search(r'(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})', name)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            # 验证时间合理性
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+    
+    # 模式6: 带分隔符格式 2026_04_22_18_30_45 或 2026-04-22-18-30-45
+    match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})', name)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+    
+    # 模式7: 带T分隔符 20260422T183045
+    match = re.search(r'(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})', name)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+    
+    # 模式8: 纯日期格式 20260505 (仅日期，时间设为00:00:00)
+    match = re.search(r'^(\d{4})(\d{2})(\d{2})$', name)
+    if match:
+        try:
+            year, month, day = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, 0, 0, 0)
+        except:
+            pass
+
+    # 模式9: YYYY-MM-DD HHMMSS 或 YYYY-MM-DD_HHMMSS（手机默认拍照格式）
+    match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})[ _](\d{2})(\d{2})(\d{2})', name)
+    if match:
+        try:
+            year, month, day, hour, minute, second = map(int, match.groups())
+            if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
+                return datetime(year, month, day, hour, minute, second)
+        except:
+            pass
+
+    return None
+
+
 class PhotoImportThread(QThread):
-    """照片导入和匹配后台线程"""
+    """照片导入和匹配后台线程 - 支持本机拍摄照片全自动关联和外设照片自动偏移"""
+    
+    # 信号定义
     progress_update = pyqtSignal(int, str)  # progress, message
     match_found = pyqtSignal(str, str, str)  # marker_id, filename, match_type
     import_complete = pyqtSignal(dict)  # results
+    status_update = pyqtSignal(str)  # 状态更新信号
+    
+    # 本机拍摄照片命名格式: 楼层名_点位序号_YYYYMMDD_HHMMSS.jpg
+    LOCAL_PHOTO_RE = re.compile(r'^(.+?)_(\d+)_(\d{8})_(\d{6})\.(jpg|jpeg)$', re.IGNORECASE)
     
     def __init__(self, project_dir: str, photo_dir: str, floors: List[dict], 
                  time_offset: int = 0, use_exif: bool = True, threshold: int = 30,
@@ -642,327 +769,469 @@ class PhotoImportThread(QThread):
         self.photo_dir = photo_dir
         self.floors = floors
         self.time_offset = time_offset
-        self.use_exif = use_exif  # 是否使用 EXIF 时间
-        self.threshold = threshold  # 匹配阈值（秒）
-        self.photo_base_dir = photo_base_dir  # 照片根目录
-        self._suggested_offset = None  # 建议的校准值
+        self.use_exif = use_exif
+        self.threshold = threshold
+        self.photo_base_dir = photo_base_dir
+        
         # 收集所有楼层的标记点
         self.markers = []
+        self.floor_name_map = {}  # 楼层名到楼层数据的映射
+        
         for floor in floors:
+            floor_name = floor.get('name', '未知')
             floor_markers = floor.get('markers', [])
-            print(f"[调试] 楼层 {floor.get('name', '未知')}: {len(floor_markers)} 个标记点")
-            for m in floor_markers[:2]:  # 只显示前2个
-                print(f"[调试]   标记点: id={m.get('id')}, status={m.get('status')}, startTime={m.get('startTime', '无')}, endTime={m.get('endTime', '无')}, captureTime={m.get('captureTime', '无')}")
+            self.floor_name_map[floor_name] = floor
+            
+            print(f"[升级] 楼层 {floor_name}: {len(floor_markers)} 个标记点")
+            for m in floor_markers[:2]:
+                print(f"[升级]   标记点: id={m.get('id')}, status={m.get('status')}")
             self.markers.extend(floor_markers)
         
+        # 匹配结果追踪（防止重复关联）
+        self._used_photos = set()
+        # 自动计算的偏移值
+        self._auto_offset = None
+        
+    def _parse_local_photo_name(self, filename: str) -> Optional[dict]:
+        """解析本机拍摄照片文件名
+        
+        格式: 楼层名_点位序号_YYYYMMDD_HHMMSS.jpg
+        
+        Returns:
+            dict: {'floor_name': str, 'marker_index': int, 'datetime': datetime}
+            None: 不是本机拍摄照片格式
+        """
+        match = self.LOCAL_PHOTO_RE.match(filename)
+        if not match:
+            return None
+        
+        floor_name = match.group(1)
+        marker_index = int(match.group(2))
+        date_str = match.group(3)  # YYYYMMDD
+        time_str = match.group(4)  # HHMMSS
+        
+        try:
+            dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+            return {
+                'floor_name': floor_name,
+                'marker_index': marker_index,
+                'datetime': dt
+            }
+        except ValueError:
+            return None
+    
+    def _classify_photos(self, photo_files: List[str]) -> Tuple[List[dict], List[dict]]:
+        """自动区分本机拍摄照片和外设拍摄照片
+        
+        Returns:
+            (local_photos, external_photos): 两个列表，每个元素是 {path, info} 字典
+        """
+        local_photos = []
+        external_photos = []
+        
+        for pf in photo_files:
+            filename = os.path.basename(pf)
+            parsed = self._parse_local_photo_name(filename)
+            
+            if parsed:
+                local_photos.append({
+                    'path': pf,
+                    'floor_name': parsed['floor_name'],
+                    'marker_index': parsed['marker_index'],
+                    'datetime': parsed['datetime']
+                })
+                print(f"[升级] 本机拍摄: {filename} (楼层:{parsed['floor_name']}, 点位:{parsed['marker_index']})")
+            else:
+                # 外设照片，记录EXIF时间（无EXIF时尝试文件名提取）
+                exif_time = extract_exif_datetime(pf)
+                if not exif_time:
+                    exif_time = extract_time_from_filename(filename)
+                external_photos.append({
+                    'path': pf,
+                    'exif_time': exif_time
+                })
+                if exif_time:
+                    print(f"[升级] 外设照片: {filename} (时间:{exif_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                else:
+                    print(f"[升级] 外设照片: {filename} (无时间)")
+        
+        return local_photos, external_photos
+    
+    def _match_local_photos(self, local_photos: List[dict]) -> Dict[str, List[str]]:
+        """本机拍摄照片全自动关联 - 基于时间范围匹配，一个点位可关联多张照片
+        
+        匹配规则:
+        1. 在对应楼层中查找 startTime <= photoTime <= endTime 的点位
+        2. 收集所有落在时间范围内的照片到该点位
+        3. 时间范围未命中时，用点位序号兜底匹配
+        
+        Returns:
+            Dict[marker_id, List[photo_path]]: 匹配结果
+        """
+        from datetime import timedelta
+        match_results: Dict[str, List[str]] = {}
+        
+        for photo in local_photos:
+            floor_name = photo['floor_name']
+            marker_index = photo['marker_index']
+            photo_time = photo['datetime']
+            photo_path = photo['path']
+            
+            # 跳过已使用的照片
+            if photo_path in self._used_photos:
+                print(f"[升级] 跳过重复: {os.path.basename(photo_path)}")
+                continue
+            
+            # 查找对应的楼层
+            floor = self.floor_name_map.get(floor_name)
+            if not floor:
+                print(f"[升级] 未找到楼层: {floor_name}")
+                continue
+            
+            markers = floor.get('markers', [])
+            captured = [m for m in markers if m.get('status') == 'captured'
+                        and not (m.get('panoramaPath') or m.get('originalPhotoPath'))]
+            
+            # 阶段1: 基于时间范围匹配（核心逻辑）
+            time_matches = []
+            for m in captured:
+                marker = Marker.from_dict(m)
+                time_range = marker.get_time_range()
+                if not time_range:
+                    continue
+                start_time, end_time = time_range
+                # 去除时区以便比较
+                if start_time.tzinfo:
+                    start_time = start_time.replace(tzinfo=None)
+                if end_time.tzinfo:
+                    end_time = end_time.replace(tzinfo=None)
+                
+                if start_time <= photo_time <= end_time:
+                    diff = abs((photo_time - start_time).total_seconds())
+                    time_matches.append((m.get('id', ''), diff, photo_path))
+            
+            if len(time_matches) >= 1:
+                # 选择 startTime 最接近的点位
+                time_matches.sort(key=lambda x: x[1])
+                marker_id = time_matches[0][0]
+                if marker_id not in match_results:
+                    match_results[marker_id] = []
+                match_results[marker_id].append(photo_path)
+                self._used_photos.add(photo_path)
+                print(f"[升级] 本机照片时间匹配: {os.path.basename(photo_path)} -> 标记点 {marker_id}")
+                continue
+            
+            # 阶段2: 时间范围未命中，用点位序号兜底
+            for m in captured:
+                marker_id = m.get('id', '')
+                custom_name = m.get('customName', '')
+                marker_seq = None
+                
+                # 从 customName 解析序号
+                if custom_name:
+                    parts = custom_name.replace('-', '_').split('_')
+                    for part in reversed(parts):
+                        if part.isdigit():
+                            marker_seq = int(part)
+                            break
+                
+                # 从 id 解析序号
+                if marker_seq is None:
+                    id_parts = marker_id.split('_')
+                    for part in reversed(id_parts):
+                        if part.isdigit():
+                            marker_seq = int(part)
+                            break
+                
+                if marker_seq == marker_index:
+                    if marker_id not in match_results:
+                        match_results[marker_id] = []
+                    match_results[marker_id].append(photo_path)
+                    self._used_photos.add(photo_path)
+                    print(f"[升级] 本机照片序号兜底: {os.path.basename(photo_path)} -> 标记点 {marker_id}")
+                    break
+        
+        return match_results
+    
+    def _calculate_auto_offset(self, external_photos: List[dict], captured_markers: List[dict]) -> int:
+        """自动计算外设照片的时间偏移
+        
+        通过比对EXIF时间和采集点时间的中位数差来计算偏移
+        
+        Returns:
+            int: 偏移秒数
+        """
+        if not external_photos or not captured_markers:
+            return 0
+        
+        # 收集EXIF时间
+        exif_times = []
+        for photo in external_photos:
+            if photo.get('exif_time'):
+                exif_times.append(photo['exif_time'])
+        
+        if not exif_times:
+            print("[升级] 外设照片无EXIF时间，无法自动计算偏移")
+            return 0
+        
+        # 收集采集点时间
+        marker_times = []
+        for m in captured_markers:
+            marker = Marker.from_dict(m)
+            time_range = marker.get_time_range()
+            if time_range:
+                start, _ = time_range
+                if start.tzinfo:
+                    start = start.replace(tzinfo=None)
+                marker_times.append(start)
+        
+        if not marker_times:
+            return 0
+        
+        # 计算中位数时间
+        exif_times_sorted = sorted(exif_times)
+        marker_times_sorted = sorted(marker_times)
+        
+        # 中位数
+        mid = len(exif_times_sorted) // 2
+        median_exif = exif_times_sorted[mid]
+        
+        mid_marker = len(marker_times_sorted) // 2
+        median_marker = marker_times_sorted[mid_marker]
+        
+        # 计算差值（秒）
+        diff_seconds = (median_exif - median_marker).total_seconds()
+        
+        # 四舍五入到最近的小时
+        hours = round(diff_seconds / 3600)
+        offset = int(hours * 3600)
+        
+        print(f"[升级] 自动偏移计算: EXIF中位数={median_exif.strftime('%H:%M:%S')}, "
+              f"采集点中位数={median_marker.strftime('%H:%M:%S')}, "
+              f"差值={diff_seconds:.0f}秒, 偏移={offset}秒 ({hours}小时)")
+        
+        return offset
+    
+    def _match_external_photos(self, external_photos: List[dict], 
+                               captured_markers: List[dict], 
+                               time_offset: int) -> Dict[str, List[str]]:
+        """外设照片匹配 - 使用自动计算的偏移进行时间范围匹配，一个点位可关联多张照片
+        
+        Returns:
+            Dict[marker_id, List[photo_path]]: 匹配结果
+        """
+        from datetime import timedelta
+        
+        match_results: Dict[str, List[str]] = {}
+        threshold = self.threshold  # 30秒阈值
+        
+        for m in captured_markers:
+            marker = Marker.from_dict(m)
+            
+            # 跳过已关联的
+            if m.get('panoramaPath') or m.get('originalPhotoPath'):
+                continue
+            
+            marker_id = marker.id
+            time_range = marker.get_time_range()
+            if not time_range:
+                continue
+            
+            start_time, end_time = time_range
+            
+            # 应用偏移
+            adjusted_start = start_time + timedelta(seconds=time_offset)
+            adjusted_end = end_time + timedelta(seconds=time_offset)
+            
+            if adjusted_start.tzinfo:
+                adjusted_start = adjusted_start.replace(tzinfo=None)
+            if adjusted_end.tzinfo:
+                adjusted_end = adjusted_end.replace(tzinfo=None)
+            
+            range_seconds = (adjusted_end - adjusted_start).total_seconds()
+            center = adjusted_start + timedelta(seconds=range_seconds / 2)
+            
+            # 阈值策略：
+            # 使用固定阈值 300 秒（与自动校准一致）
+            # 确保能够匹配到照片，避免动态阈值过小导致匹配失败
+            threshold = 300
+            
+            best_match = None
+            best_diff = float('inf')
+            
+            for photo in external_photos:
+                photo_path = photo['path']
+                
+                # 跳过已使用的照片
+                if photo_path in self._used_photos:
+                    continue
+                
+                exif_time = photo.get('exif_time')
+                if not exif_time:
+                    continue
+                
+                if exif_time.tzinfo:
+                    exif_time = exif_time.replace(tzinfo=None)
+                
+                # 计算与采集时间中心的时间差
+                diff = abs((exif_time - center).total_seconds())
+                
+                # 在阈值内且比之前找到的更好
+                if diff <= threshold and diff < best_diff:
+                    best_diff = diff
+                    best_match = photo_path
+            
+            # 只返回最佳匹配（单张）
+            if best_match:
+                match_results[marker_id] = [best_match]
+                self._used_photos.add(best_match)
+                print(f"[升级] 外设照片匹配: {os.path.basename(best_match)} -> "
+                      f"标记点 {marker_id}, 中心差{best_diff:.0f}秒")
+        
+        return match_results
+    
     def run(self):
+        """执行照片导入和匹配"""
         results = {
-            'exact': 0,      # EXIF 时间精确匹配
-            'similar': 0,    # 文件名相似匹配
-            'manual': 0,
+            'local_matched': 0,   # 本机拍摄直接匹配
+            'external_matched': 0, # 外设照片时间匹配
+            'auto_offset': 0,      # 自动计算的偏移
             'missing': 0,
             'details': []
         }
         
-        # 收集所有照片文件
+        # 1. 收集所有照片文件
+        self.status_update.emit("正在扫描照片...")
         photo_files = []
         for root, dirs, files in os.walk(self.photo_dir):
             for f in files:
-                if f.lower().endswith(('.jpg', '.jpeg')):
+                if f.lower().endswith(('.jpg', '.jpeg', '.png')):
                     photo_files.append(os.path.join(root, f))
         
-        print(f"[调试] 找到 {len(photo_files)} 张照片")
-        print(f"[调试] 找到 {len(self.markers)} 个标记点")
-        print(f"[调试] 时间偏移: {self.time_offset} 秒")
+        print(f"[升级] 扫描完成: {len(photo_files)} 张照片, {len(self.markers)} 个标记点")
+        self.progress_update.emit(5, f"找到 {len(photo_files)} 张照片，正在分析...")
         
-        # 预提取所有照片的 EXIF 时间（加速匹配）
-        self.progress_update.emit(0, "正在读取照片 EXIF 信息...")
-        self.photo_exif_times = {}
-        for pf in photo_files:
-            dt = extract_exif_datetime(pf)
-            if dt:
-                self.photo_exif_times[pf] = dt
-                print(f"[调试] 照片 EXIF: {os.path.basename(pf)} -> {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        # 2. 自动区分照片来源
+        local_photos, external_photos = self._classify_photos(photo_files)
+        print(f"[升级] 分类结果: 本机拍摄={len(local_photos)}, 外设照片={len(external_photos)}")
+        self.progress_update.emit(10, f"本机拍摄:{len(local_photos)} 外设:{len(external_photos)}")
         
-        print(f"[调试] 成功提取 EXIF 时间的照片: {len(self.photo_exif_times)} 张")
-        if len(self.photo_exif_times) == 0:
-            print("[调试] 警告: 没有照片包含EXIF时间信息!")
-            # 显示一些照片文件名帮助诊断
-            for pf in photo_files[:3]:
-                print(f"[调试] 示例照片: {os.path.basename(pf)}")
+        # 3. 本机拍摄照片全自动关联
+        self.status_update.emit("正在关联本机拍摄照片...")
+        local_matches = self._match_local_photos(local_photos)
+        print(f"[升级] 本机拍摄匹配: {len(local_matches)} 个")
+        self.progress_update.emit(30, f"本机拍摄关联完成: {len(local_matches)} 个")
         
-        # 统计各状态标记点数量
+        # 4. 外设照片自动偏移计算
         captured_markers = [m for m in self.markers if m.get('status') == 'captured']
-        print(f"[调试] 已拍摄标记点 (captured): {len(captured_markers)} 个")
+        if external_photos and captured_markers:
+            self.status_update.emit("正在计算时间偏移...")
+            self._auto_offset = self._calculate_auto_offset(external_photos, captured_markers)
+            results['auto_offset'] = self._auto_offset
+            
+            if self._auto_offset != 0:
+                hours = self._auto_offset / 3600
+                print(f"[升级] 使用自动偏移: {self._auto_offset}秒 ({hours:+.1f}小时)")
+                self.progress_update.emit(40, f"自动偏移: {hours:+.1f}小时")
+            else:
+                self.progress_update.emit(40, "无时间偏移")
         
-        # 显示标记点时间信息
-        for m in captured_markers[:3]:
-            marker = Marker.from_dict(m)
-            tr = marker.get_time_range()
-            if tr:
-                start, end = tr
-                print(f"[调试] 标记点 {marker.customName or marker.id}: 范围 [{start.strftime('%H:%M:%S')} - {end.strftime('%H:%M:%S')}]")
+        # 5. 外设照片时间匹配
+        self.status_update.emit("正在关联外设照片...")
+        external_matches = self._match_external_photos(
+            external_photos, captured_markers, self._auto_offset or 0
+        )
+        print(f"[升级] 外设照片匹配: {len(external_matches)} 个")
+        self.progress_update.emit(70, f"外设照片关联完成: {len(external_matches)} 个")
         
+        # 6. 应用匹配结果到标记点
         total_markers = len(self.markers)
+        processed = 0
         
         for idx, marker_data in enumerate(self.markers):
             marker = Marker.from_dict(marker_data)
-            progress = int((idx / total_markers) * 100)
+            progress = 70 + int((idx / total_markers) * 30)
             self.progress_update.emit(progress, f"正在处理: {marker.customName or marker.id}")
             
-            if marker.status != 'captured':
-                print(f"[调试] 标记点 {marker.customName or marker.id}: 状态={marker.status}, 跳过")
-                results['missing'] += 1
-                marker_data['status'] = 'missing'
-                continue
-            
-            print(f"[调试] 处理标记点 {marker.customName or marker.id}...")
-            
-            # 1. EXIF 时间匹配（最准确）
-            if self.use_exif and self.photo_exif_times:
-                matched_file = self._exif_time_match(marker)
-                if matched_file:
-                    self._link_photo(matched_file, marker)
+            try:
+                if marker.status != 'captured':
+                    results['missing'] += 1
+                    marker_data['status'] = 'missing'
+                    continue
+                
+                marker_id = marker.id
+                
+                # 检查本机拍摄匹配
+                if marker_id in local_matches:
+                    photo_paths = local_matches[marker_id]
+                    self._link_photos(photo_paths, marker)
                     marker_data['status'] = 'linked'
                     marker_data['panoramaPath'] = marker.panoramaPath
                     marker_data['originalPhotoPath'] = marker.originalPhotoPath
-                    marker_data['cameraFileName'] = os.path.basename(matched_file)
-                    results['exact'] += 1
-                    self.match_found.emit(marker.id, os.path.basename(matched_file), 'exact')
+                    marker_data['photos'] = marker.photos
+                    marker_data['cameraFileName'] = os.path.basename(photo_paths[0]) if photo_paths else ''
+                    results['local_matched'] += 1
+                    self.match_found.emit(marker_id, os.path.basename(photo_paths[0]) if photo_paths else '', 'local')
                     continue
+                
+                # 检查外设照片匹配
+                if marker_id in external_matches:
+                    photo_paths = external_matches[marker_id]
+                    self._link_photos(photo_paths, marker)
+                    marker_data['status'] = 'linked'
+                    marker_data['panoramaPath'] = marker.panoramaPath
+                    marker_data['originalPhotoPath'] = marker.originalPhotoPath
+                    marker_data['photos'] = marker.photos
+                    marker_data['cameraFileName'] = os.path.basename(photo_paths[0]) if photo_paths else ''
+                    results['external_matched'] += 1
+                    self.match_found.emit(marker_id, os.path.basename(photo_paths[0]) if photo_paths else '', 'external')
+                    continue
+                
+                # 未找到匹配
+                results['missing'] += 1
+                marker_data['status'] = 'missing'
+                
+            except Exception as e:
+                print(f"[错误] 处理标记点 {marker_id} 时发生异常: {e}")
+                import traceback
+                traceback.print_exc()
+                results['missing'] += 1
+                marker_data['status'] = 'missing'
             
-            # 2. 文件名时间戳匹配（备选）
-            matched_file = self._filename_time_match(marker, photo_files)
-            if matched_file:
-                self._link_photo(matched_file, marker)
-                marker_data['status'] = 'linked'
-                marker_data['panoramaPath'] = marker.panoramaPath
-                marker_data['originalPhotoPath'] = marker.originalPhotoPath
-                marker_data['cameraFileName'] = os.path.basename(matched_file)
-                results['similar'] += 1
-                self.match_found.emit(marker.id, os.path.basename(matched_file), 'similar')
-                continue
-            
-            # 3. 未找到
-            results['missing'] += 1
-            marker.status = 'missing'
-            marker_data['status'] = 'missing'
+            processed += 1
         
+        # 7. 完成
         self.progress_update.emit(100, "导入完成")
+        total_linked = results['local_matched'] + results['external_matched']
+        self.status_update.emit(f"完成: 关联{total_linked}个，缺失{results['missing']}个")
         self.import_complete.emit(results)
     
-    def _exif_time_match(self, marker: Marker) -> Optional[str]:
-        """使用 EXIF 时间进行匹配 - 支持时间范围匹配"""
-        marker_name = marker.customName or marker.id
+    def _link_photos(self, photo_paths: List[str], marker: Marker):
+        """关联多张照片（纯路径关联，不复制文件）"""
+        rel_paths = []
         
-        # 获取时间范围 (start, end)
-        time_range = marker.get_time_range()
-        if not time_range:
-            print(f"[调试] 标记点 {marker_name}: 无时间信息")
-            return None
-        
-        start_time, end_time = time_range
-        
-        try:
-            # 应用 timeOffset 校正
-            from datetime import timedelta
-            adjusted_start = start_time + timedelta(seconds=self.time_offset)
-            adjusted_end = end_time + timedelta(seconds=self.time_offset)
-            
-            # 转换为本地时间（去除时区信息）以便与 EXIF 时间比较
-            # EXIF 时间是本地时间，没有时区信息
-            if adjusted_start.tzinfo:
-                adjusted_start = adjusted_start.replace(tzinfo=None)
-            if adjusted_end.tzinfo:
-                adjusted_end = adjusted_end.replace(tzinfo=None)
-            
-            # 计算时间范围长度
-            range_seconds = (adjusted_end - adjusted_start).total_seconds()
-            
-            if range_seconds > 0:
-                print(f"[调试] 标记点 {marker_name}: 时间范围 [{adjusted_start.strftime('%H:%M:%S')} - {adjusted_end.strftime('%H:%M:%S')}], 持续{range_seconds:.0f}秒")
-            else:
-                print(f"[调试] 标记点 {marker_name}: 单点时间 {adjusted_start.strftime('%H:%M:%S')}")
-            
-            # 打印所有照片时间帮助诊断
-            print(f"[调试] 标记点 {marker_name}: 可用照片时间:")
-            for photo_path, photo_time in list(self.photo_exif_times.items())[:5]:
-                pt = photo_time.replace(tzinfo=None) if photo_time.tzinfo else photo_time
-                print(f"[调试]   {os.path.basename(photo_path)}: {pt.strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # 收集候选照片，按拍摄时间排序，返回第一张在阈值内的
-            candidates = []
-            for photo_path, photo_time in self.photo_exif_times.items():
-                # 确保照片时间也没有时区信息
-                if photo_time.tzinfo:
-                    photo_time = photo_time.replace(tzinfo=None)
-                
-                # 计算时间差（秒）
-                if range_seconds > 0:
-                    range_center = adjusted_start + timedelta(seconds=range_seconds / 2)
-                    diff = abs((photo_time - range_center).total_seconds())
+        for source_path in photo_paths:
+            try:
+                abs_source = os.path.abspath(source_path)
+                if self.photo_base_dir:
+                    abs_base = os.path.abspath(self.photo_base_dir)
+                    try:
+                        if os.path.commonpath([abs_source, abs_base]) == abs_base:
+                            rel_path = os.path.relpath(abs_source, abs_base)
+                            rel_paths.append('external_photos/' + rel_path.replace('\\', '/'))
+                        else:
+                            rel_paths.append('external_photos/' + abs_source.replace('\\', '/'))
+                    except ValueError:
+                        rel_paths.append('external_photos/' + abs_source.replace('\\', '/'))
                 else:
-                    diff = abs((photo_time - adjusted_start).total_seconds())
-                
-                candidates.append((photo_path, diff, photo_time))
-            
-            # 按与采集点中心时间差值排序，取差值最小的第一张照片
-            candidates.sort(key=lambda x: x[1])
-            print(f"[调试] 标记点 {marker_name}: 候选照片(按时间排序, 取第一张):")
-            for i, (path, diff, ptime) in enumerate(candidates[:5]):
-                print(f"[调试]   {i+1}. {os.path.basename(path)}: {ptime.strftime('%H:%M:%S')} 差{diff:.1f}秒")
-            
-            # 返回第一个在阈值内的照片（同一时间段内多张照片时只识别第一张）
-            for photo_path, diff, photo_time in candidates:
-                if diff <= self.threshold:
-                    print(f"[调试] 标记点 {marker_name}: 匹配成功 {os.path.basename(photo_path)}, 时间差={diff:.1f}秒")
-                    return photo_path
-            
-            if candidates:
-                best_diff = candidates[0][1]
-                print(f"[调试] 标记点 {marker_name}: 最佳匹配时间差={best_diff:.1f}秒, 超过阈值{self.threshold}秒")
-                # 如果差距很大（超过1小时）且未设置建议值，记录建议的校准值
-                if best_diff > 3600 and self._suggested_offset is None:
-                    # 需要判断是相机快还是慢
-                    best_match = candidates[0][0]
-                    pf_time = None
-                    for p, t in self.photo_exif_times.items():
-                        if p == best_match:
-                            pf_time = t
-                            break
-                    if pf_time:
-                        time_range = marker.get_time_range()
-                        if time_range:
-                            start_time, _ = time_range
-                            # 计算差值
-                            diff_seconds = (pf_time - start_time.replace(tzinfo=None) if start_time.tzinfo else pf_time - start_time).total_seconds()
-                            hours = round(diff_seconds / 3600)
-                            self._suggested_offset = int(hours * 3600)
-                            print(f"[调试] 建议校准值: {self._suggested_offset} 秒 ({hours}小时)")
-            else:
-                print(f"[调试] 标记点 {marker_name}: 无匹配照片")
-            
-        except Exception as e:
-            print(f"[调试] 标记点 {marker_name}: EXIF 匹配出错: {e}")
-            import traceback
-            traceback.print_exc()
+                    rel_paths.append('external_photos/' + abs_source.replace('\\', '/'))
+            except Exception as e:
+                print(f"[错误] 路径处理异常: {e}")
+                rel_paths.append('external_photos/' + source_path.replace('\\', '/'))
         
-        return None
-    
-    def _extract_time_from_filename(self, filename: str) -> Optional[datetime]:
-        """从文件名中提取时间，支持多种格式"""
-        import re
-        
-        # 移除扩展名
-        name = os.path.splitext(filename)[0]
-        
-        # 模式1: 连续格式 20260422183045
-        match = re.search(r'(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})', name)
-        if match:
-            try:
-                year, month, day, hour, minute, second = map(int, match.groups())
-                # 验证时间合理性
-                if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
-                    return datetime(year, month, day, hour, minute, second)
-            except:
-                pass
-        
-        # 模式2: 带分隔符格式 2026_04_22_18_30_45 或 2026-04-22-18-30-45
-        match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})[-_](\d{2})', name)
-        if match:
-            try:
-                year, month, day, hour, minute, second = map(int, match.groups())
-                if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
-                    return datetime(year, month, day, hour, minute, second)
-            except:
-                pass
-        
-        # 模式3: 带T分隔符 20260422T183045
-        match = re.search(r'(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})', name)
-        if match:
-            try:
-                year, month, day, hour, minute, second = map(int, match.groups())
-                if 2020 <= year <= 2030 and 1 <= month <= 12 and 1 <= day <= 31:
-                    return datetime(year, month, day, hour, minute, second)
-            except:
-                pass
-        
-        return None
-    
-    def _filename_time_match(self, marker: Marker, photo_files: List[str]) -> Optional[str]:
-        """使用文件名时间戳进行匹配（备选方案）- 支持时间范围"""
-        marker_name = marker.customName or marker.id
-        
-        # 获取时间范围
-        time_range = marker.get_time_range()
-        if not time_range:
-            return None
-        
-        start_time, end_time = time_range
-        
-        try:
-            # 应用 timeOffset
-            from datetime import timedelta
-            adjusted_start = start_time + timedelta(seconds=self.time_offset)
-            adjusted_end = end_time + timedelta(seconds=self.time_offset)
-            
-            # 去除时区信息，转换为本地时间
-            if adjusted_start.tzinfo:
-                adjusted_start = adjusted_start.replace(tzinfo=None)
-            if adjusted_end.tzinfo:
-                adjusted_end = adjusted_end.replace(tzinfo=None)
-            
-            range_seconds = (adjusted_end - adjusted_start).total_seconds()
-            
-            print(f"[调试] {marker_name}: 文件名匹配 - 时间范围 [{adjusted_start}] - [{adjusted_end}]")
-            
-            # 收集候选并按文件名时间排序，返回第一张匹配的
-            candidates = []
-            for pf in photo_files:
-                pf_time = self._extract_time_from_filename(os.path.basename(pf))
-                if pf_time:
-                    diff = abs((pf_time - adjusted_start).total_seconds())
-                    if range_seconds > 0:
-                        range_center = adjusted_start + timedelta(seconds=range_seconds / 2)
-                        diff = abs((pf_time - range_center).total_seconds())
-                    candidates.append((pf, diff, pf_time))
-            
-            # 按与采集点中心时间差值排序，取差值最小的第一张匹配的
-            candidates.sort(key=lambda x: x[1])
-            print(f"[调试] {marker_name}: 文件名候选(按时间排序, 取第一张):")
-            for i, (pf, diff, ptime) in enumerate(candidates[:5]):
-                print(f"[调试]   {i+1}. {os.path.basename(pf)}: {ptime.strftime('%H:%M:%S')} 差{diff:.0f}秒")
-            
-            for pf, diff, pf_time in candidates:
-                if diff <= 600:
-                    print(f"[调试] {marker_name}: 文件名匹配成功 {os.path.basename(pf)}, 差{diff:.0f}秒")
-                    return pf
-            
-            if candidates:
-                best_diff = candidates[0][1]
-                print(f"[调试] {marker_name}: 文件名最佳匹配差{best_diff:.0f}秒 ({best_diff/3600:.1f}小时), 超阈值")
-                if best_diff > 3600:
-                    print(f"[调试] {marker_name}: 建议设置校准值约 {int(best_diff)} 秒 ({int(best_diff/3600)}小时)")
-            
-        except Exception as e:
-            print(f"[调试] 文件名匹配出错: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return None
-    
-    def _link_photo(self, source_path: str, marker: Marker):
-        """关联照片（不复制，只记录路径）"""
-        marker.originalPhotoPath = source_path
-        
-        if self.photo_base_dir and os.path.commonpath([os.path.abspath(source_path), os.path.abspath(self.photo_base_dir)]) == os.path.abspath(self.photo_base_dir):
-            # 如果在照片基目录下，记录相对路径
-            rel_path = os.path.relpath(source_path, self.photo_base_dir)
-            marker.panoramaPath = rel_path.replace('\\', '/')
-        else:
-            # 否则记录绝对路径
-            marker.panoramaPath = os.path.abspath(source_path).replace('\\', '/')
-        
+        marker.photos = rel_paths
+        marker.panoramaPath = rel_paths[0] if rel_paths else ""
+        marker.originalPhotoPath = photo_paths[0] if photo_paths else ""
         marker.status = 'linked'
 
 
@@ -976,6 +1245,7 @@ class FloorplanCanvas(QGraphicsView):
     marker_moved = pyqtSignal(str, float, float)  # marker_id, x, y
     marker_add_requested = pyqtSignal(float, float)  # x, y (归一化坐标)
     marker_context_menu = pyqtSignal(str, QPointF)  # marker_id, global_pos
+    marker_double_clicked = pyqtSignal(str)  # marker_id
     canvas_context_menu = pyqtSignal(QPointF)  # global_pos
 
     def __init__(self, parent=None):
@@ -1148,6 +1418,14 @@ class FloorplanCanvas(QGraphicsView):
                 return
         super().mouseReleaseEvent(event)
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.pos())
+            if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
+                self.marker_double_clicked.emit(str(item.data(0)))
+                return
+        super().mouseDoubleClickEvent(event)
+
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
         item = self.itemAt(event.pos())
@@ -1236,6 +1514,7 @@ class PanoramaManager(QMainWindow):
         self.canvas.marker_moved.connect(self._on_marker_moved)
         self.canvas.marker_add_requested.connect(self._on_marker_add_requested)
         self.canvas.marker_context_menu.connect(self._on_marker_context_menu)
+        self.canvas.marker_double_clicked.connect(self._on_marker_double_clicked)
         left_layout.addWidget(self.canvas)
         
         # 画布操作提示
@@ -1294,6 +1573,25 @@ class PanoramaManager(QMainWindow):
         """)
         self.import_photos_btn.clicked.connect(self.import_photos)
         actions_layout.addWidget(self.import_photos_btn)
+        
+        # 一键锚点按钮 - 手动指定锚点照片
+        self.one_key_anchor_btn = QPushButton("⚓ 一键锚点")
+        self.one_key_anchor_btn.setEnabled(False)
+        self.one_key_anchor_btn.setToolTip("手动指定锚点照片，用于校准时间偏移\n适用于外设拍摄照片的自动关联")
+        self.one_key_anchor_btn.setStyleSheet("""
+            QPushButton {
+                padding: 10px;
+                font-size: 13px;
+                background-color: #FF9500;
+                color: white;
+                border: none;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #B36800; }
+            QPushButton:disabled { background-color: #CCC; }
+        """)
+        self.one_key_anchor_btn.clicked.connect(self._one_key_anchor)
+        actions_layout.addWidget(self.one_key_anchor_btn)
         
         self.generate_viewer_btn = QPushButton("🌐 生成本地网页")
         self.generate_viewer_btn.setEnabled(False)
@@ -1380,6 +1678,21 @@ class PanoramaManager(QMainWindow):
         """)
         self.export_project_btn.clicked.connect(self._export_for_capture)
         actions_layout.addWidget(self.export_project_btn)
+        
+        # 导入状态显示
+        actions_layout.addSpacing(10)
+        self.import_status_label = QLabel("就绪")
+        self.import_status_label.setStyleSheet("""
+            QLabel {
+                color: #666;
+                font-size: 12px;
+                padding: 5px;
+                background-color: #f5f5f5;
+                border-radius: 4px;
+            }
+        """)
+        self.import_status_label.setWordWrap(True)
+        actions_layout.addWidget(self.import_status_label)
         
         right_layout.addWidget(actions_group)
         
@@ -1507,17 +1820,78 @@ class PanoramaManager(QMainWindow):
         marker_info_layout.addWidget(self.marker_status_label, 1, 1)
         
         marker_info_layout.addWidget(QLabel("相机文件名:"), 2, 0)
-        self.marker_filename_label = QLabel("-")
-        marker_info_layout.addWidget(self.marker_filename_label, 2, 1)
+        self.marker_filename_edit = QLineEdit("-")
+        self.marker_filename_edit.setReadOnly(True)
+        self.marker_filename_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #f5f5f5;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 5px;
+            }
+        """)
+        marker_info_layout.addWidget(self.marker_filename_edit, 2, 1)
         
-        marker_info_layout.addWidget(QLabel("自定义名称:"), 3, 0)
+        self.open_photo_folder_btn = QPushButton("📂 打开所在文件夹")
+        self.open_photo_folder_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px;
+                font-size: 12px;
+                background-color: #0a84ff;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #0866c6; }
+            QPushButton:disabled { background-color: #ccc; }
+        """)
+        self.open_photo_folder_btn.clicked.connect(self._open_photo_folder)
+        self.open_photo_folder_btn.setEnabled(False)
+        marker_info_layout.addWidget(self.open_photo_folder_btn, 3, 0, 1, 2)
+        
+        marker_info_layout.addWidget(QLabel("自定义名称:"), 4, 0)
+        custom_name_layout = QHBoxLayout()
         self.marker_custom_name = QLineEdit()
         self.marker_custom_name.editingFinished.connect(self._update_marker_name)
-        marker_info_layout.addWidget(self.marker_custom_name, 3, 1)
+        custom_name_layout.addWidget(self.marker_custom_name)
         
-        marker_info_layout.addWidget(QLabel("坐标:"), 4, 0)
+        self.pick_photo_btn = QPushButton("📷 选择照片")
+        self.pick_photo_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 10px;
+                font-size: 12px;
+                background-color: #34C759;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #248A3D; }
+            QPushButton:disabled { background-color: #ccc; }
+        """)
+        self.pick_photo_btn.clicked.connect(self._show_photo_picker)
+        self.pick_photo_btn.setEnabled(False)
+        custom_name_layout.addWidget(self.pick_photo_btn)
+        marker_info_layout.addLayout(custom_name_layout, 4, 1)
+        
+        marker_info_layout.addWidget(QLabel("坐标:"), 5, 0)
         self.marker_coord_label = QLabel("-")
-        marker_info_layout.addWidget(self.marker_coord_label, 4, 1)
+        marker_info_layout.addWidget(self.marker_coord_label, 5, 1)
+        
+        self.delete_marker_btn = QPushButton("🗑️ 删除当前点位")
+        self.delete_marker_btn.setStyleSheet("""
+            QPushButton {
+                padding: 8px;
+                font-size: 13px;
+                background-color: #FF3B30;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                margin-top: 8px;
+            }
+            QPushButton:hover { background-color: #B32418; }
+        """)
+        self.delete_marker_btn.clicked.connect(self._delete_current_marker)
+        marker_info_layout.addWidget(self.delete_marker_btn, 6, 0, 1, 2)
         
         self.marker_info_group.setEnabled(False)
         right_layout.addWidget(self.marker_info_group)
@@ -1596,6 +1970,7 @@ class PanoramaManager(QMainWindow):
         right_layout.addStretch()
         
         splitter.addWidget(right_panel)
+        right_panel.setMinimumWidth(360)
         splitter.setSizes([900, 500])
     
     def _get_history_file(self) -> str:
@@ -1718,11 +2093,6 @@ class PanoramaManager(QMainWindow):
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
         
-        calibrate_action = QAction("时间校准(&C)...", self)
-        calibrate_action.setShortcut("Ctrl+T")
-        calibrate_action.triggered.connect(lambda: self._show_calibration_dialog(None))
-        tools_menu.addAction(calibrate_action)
-        
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
         
@@ -1775,22 +2145,34 @@ class PanoramaManager(QMainWindow):
             # 加载项目
             self._load_project(project_json_path)
             
+            # 设置项目目录为解压目录
+            self.project_dir = extract_dir
+            
+            # 检查并设置照片基目录（查找同级目录下的常见照片文件夹）
+            zip_parent_dir = os.path.dirname(file_path)
+            photo_base_dir = self._find_photo_base_dir(zip_parent_dir)
+            if photo_base_dir:
+                self.project_data.photoBaseDir = photo_base_dir
+                self._save_project()
+                print(f"[调试] 自动设置照片基目录: {photo_base_dir}")
+            
             # 添加到历史记录
             if self.project_data:
                 self._add_to_history(self.project_dir, self.project_data.projectName)
             
             # 显示成功提示
+            photo_hint = f"\n\n照片基目录: {photo_base_dir}" if photo_base_dir else "\n\n未找到照片文件夹，请手动设置"
             QMessageBox.information(
                 self, 
                 "导入成功", 
-                f"项目已导入并自动选择:\n{extract_dir}"
+                f"项目已导入并自动选择:\n{extract_dir}{photo_hint}"
             )
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入失败: {str(e)}")
     
     def import_from_folder(self):
-        """从文件夹导入项目 - 自动识别ZIP和照片文件夹"""
+        """从文件夹导入项目 - 自动识别ZIP和照片文件夹（适配手机本机拍摄）"""
         dir_path = QFileDialog.getExistingDirectory(
             self, "选择包含项目数据包和照片的文件夹"
         )
@@ -1817,6 +2199,21 @@ class PanoramaManager(QMainWindow):
                             break
                     if jpg_count > 5:
                         photo_dirs.append((item_path, jpg_count))
+            
+            # 自动扫描常见照片目录（DCIM, Photos, Camera, 图片等）
+            common_photo_dirs = ['DCIM', 'Photos', 'Camera', '图片', '照片', '相册', 'Pictures']
+            for common_name in common_photo_dirs:
+                common_path = os.path.join(dir_path, common_name)
+                if os.path.isdir(common_path) and common_path not in [p[0] for p in photo_dirs]:
+                    jpg_count = 0
+                    for root, dirs, files in os.walk(common_path):
+                        for f in files:
+                            if f.lower().endswith(('.jpg', '.jpeg')):
+                                jpg_count += 1
+                        if jpg_count > 0:
+                            break
+                    if jpg_count > 0:
+                        photo_dirs.append((common_path, jpg_count))
             
             if not zip_files:
                 QMessageBox.warning(self, "提示", "所选文件夹中没有找到 ZIP 项目数据包")
@@ -1998,6 +2395,7 @@ class PanoramaManager(QMainWindow):
             
             # 启用按钮
             self.import_photos_btn.setEnabled(True)
+            self.one_key_anchor_btn.setEnabled(True)
             self.generate_viewer_btn.setEnabled(True)
             self.open_web_btn.setEnabled(True)
             self.save_changes_btn.setEnabled(True)
@@ -2066,21 +2464,16 @@ class PanoramaManager(QMainWindow):
         self.calibration_thread.start()
     
     def _on_auto_calibration_complete(self, suggested_offset: int, matched_count: int, total_count: int):
-        """自动校准完成回调 - 自动应用并导入"""
+        """自动校准完成回调 - 自动应用并导入，减少弹窗干扰"""
         print(f"[调试] 自动校准完成: 建议偏移={suggested_offset}秒, 匹配={matched_count}/{total_count}")
         
         photo_dir = getattr(self, '_pending_photo_dir', None)
+        THRESHOLD_SECONDS = 172800  # 48小时异常阈值
         
         # 如果有建议的校准值且与当前不同，自动应用
         if suggested_offset != 0 and suggested_offset != self.project_data.timeOffset:
             hours = abs(suggested_offset) // 3600
             minutes = (abs(suggested_offset) % 3600) // 60
-            
-            time_diff_str = ""
-            if hours > 0:
-                time_diff_str += f"{hours}小时"
-            if minutes > 0:
-                time_diff_str += f"{minutes}分钟"
             
             # 自动应用校准值
             self.project_data.timeOffset = suggested_offset
@@ -2093,126 +2486,238 @@ class PanoramaManager(QMainWindow):
                 calib_text = f"{suggested_offset}秒 (相机慢)"
             self.calibration_label.setText(calib_text)
             
-            # 告知用户（信息弹窗，无需确认）
-            QMessageBox.information(
-                self, "时间校准已自动完成",
-                f"系统自动分析完成！\n\n"
-                f"检测到相机时间与手机时间相差约 {time_diff_str}。\n"
-                f"已自动设置校准值为: {suggested_offset} 秒\n\n"
-                f"【建议】\n"
-                f"为避免时区问题，建议调整相机时间设置，\n"
-                f"使相机时间与手机时间保持一致。\n\n"
-                f"即将开始导入照片..."
-            )
+            # 仅当偏移超过48小时才弹出异常提示
+            if abs(suggested_offset) > THRESHOLD_SECONDS:
+                time_diff_str = f"{hours}小时" if hours > 0 else f"{minutes}分钟"
+                if hours > 0 and minutes > 0:
+                    time_diff_str = f"{hours}小时{minutes}分钟"
+                confirm = QMessageBox.question(
+                    self, "异常时间偏移",
+                    f"检测到相机时间与手机时间相差约 {time_diff_str}（{suggested_offset} 秒），\n"
+                    f"远超正常范围（48小时）。\n\n"
+                    f"这可能是由于：\n"
+                    f"1. 相机时区设置错误\n"
+                    f"2. 相机日期/时间未调整\n"
+                    f"3. 照片来源不正确\n\n"
+                    f"是否仍要使用此偏移值继续导入？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if confirm != QMessageBox.StandardButton.Yes:
+                    self.project_data.timeOffset = 0
+                    self._save_project()
+                    self.calibration_label.setText("未校准")
+                    print("[调试] 用户拒绝异常偏移，重置为0")
+                    return
         else:
-            # 无需校准或校准值为0
+            # 无需校准或校准值为0，静默继续
             if suggested_offset == 0 and matched_count == 0:
-                QMessageBox.information(
-                    self, "自动校准结果",
-                    "无法从照片中提取有效时间信息进行校准。\n"
-                    "将使用当前校准值继续导入。\n\n"
-                    "【提示】\n"
-                    "请确保照片包含EXIF时间信息。"
-                )
+                print("[调试] 无法提取有效时间信息，将使用当前校准值继续导入")
             else:
-                QMessageBox.information(
-                    self, "自动校准结果",
-                    f"时间校准分析完成！\n\n"
-                    f"当前校准值合适，无需调整。\n"
-                    f"匹配情况: {matched_count}/{total_count}\n\n"
-                    f"即将开始导入照片..."
-                )
+                print(f"[调试] 时间校准分析完成，匹配 {matched_count}/{total_count}，无需调整")
         
         # 自动开始导入
         if photo_dir:
             self._start_import(photo_dir, self.project_data.timeOffset)
     
-    def _show_calibration_dialog(self, photo_dir: Optional[str] = None, suggested_offset: int = None):
-        """显示手动校准对话框"""
-        try:
-            # 如果有建议的校准值，直接应用并提示用户
-            if suggested_offset is not None:
-                hours = abs(suggested_offset) // 3600
-                minutes = (abs(suggested_offset) % 3600) // 60
-                time_diff_str = f"{hours}小时" if hours > 0 else f"{minutes}分钟"
-                if hours > 0 and minutes > 0:
-                    time_diff_str = f"{hours}小时{minutes}分钟"
-                
-                # 自动应用建议的校准值
-                self.project_data.timeOffset = suggested_offset
-                self._save_project()
-                self.calibration_label.setText(f"{suggested_offset}秒 (相机慢)")
-                
-                # 显示已应用的提示
-                QMessageBox.information(
-                    self, "时间校准已自动应用",
-                    f"检测到相机时间与手机时间相差约 {time_diff_str}。\n\n"
-                    f"系统已自动设置校准值为: {suggested_offset} 秒\n\n"
-                    "【建议】\n"
-                    "为避免时区问题，建议调整相机时间设置，\n"
-                    "使相机时间与手机时间保持一致。"
-                )
-                
-                if photo_dir:
-                    self._start_import(photo_dir, suggested_offset)
-                return
-            
-            dialog = TimeCalibrationDialog(self.project_data.timeOffset, self)
-            result = dialog.exec()
-            print(f"[调试] 校准对话框返回: {result}")
-            
-            # PyQt6 中 QDialog.exec() 返回整数 (1=Accepted, 0=Rejected)
-            if result == 1:  # QDialog.DialogCode.Accepted
-                new_offset = dialog.calibrated_offset
-                print(f"[调试] 用户设置校准值: {new_offset} 秒")
-                if new_offset != self.project_data.timeOffset:
-                    self.project_data.timeOffset = new_offset
-                    self._save_project()
-                    # 更新校准标签显示
-                    if new_offset == 0:
-                        calib_text = "未校准"
-                    elif new_offset > 0:
-                        calib_text = f"+{new_offset}秒 (相机快)"
-                    else:
-                        calib_text = f"{new_offset}秒 (相机慢)"
-                    self.calibration_label.setText(calib_text)
-                    QMessageBox.information(self, "校准已保存", f"时间校准值已更新为 {new_offset} 秒")
-            else:
-                print(f"[调试] 用户取消校准")
-            
-            # 如果有照片目录，继续导入
-            if photo_dir:
-                print(f"[调试] 校准后导入，偏移值: {self.project_data.timeOffset}")
-                self._start_import(photo_dir, self.project_data.timeOffset)
-        except Exception as e:
-            print(f"[调试] 校准对话框出错: {e}")
-            import traceback
-            traceback.print_exc()
-            QMessageBox.critical(self, "错误", f"校准对话框出错: {e}")
-    
     def _start_import(self, photo_dir: str, time_offset: int):
-        """开始导入照片"""
+        """开始导入照片 - 适配手机本机拍摄，使用更宽松的阈值"""
         # 创建进度对话框
         self.progress_dialog = QProgressDialog("正在扫描照片...", "取消", 0, 100, self)
         self.progress_dialog.setWindowTitle("导入照片")
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.progress_dialog.show()
         
-        # 启动导入线程 - 使用更宽松的阈值(300秒=5分钟)
+        # 判断照片来源类型，设置合适的匹配阈值
+        # 手机本机拍摄通常需要更多时间调整位置，使用更宽松的阈值
+        threshold = self._detect_photo_source_threshold(photo_dir)
+        
+        # 启动导入线程
         photo_base_dir = getattr(self.project_data, 'photoBaseDir', '') or photo_dir
         self.import_thread = PhotoImportThread(
             self.project_dir, photo_dir, self.project_data.floors, 
-            time_offset, use_exif=True, threshold=300,
+            time_offset, use_exif=True, threshold=threshold,
             photo_base_dir=photo_base_dir
         )
         self.import_thread.progress_update.connect(self._on_import_progress)
+        self.import_thread.status_update.connect(self._on_import_status_update)
         self.import_thread.import_complete.connect(self._on_import_complete)
         self.import_thread.start()
+    
+    def _detect_photo_source_threshold(self, photo_dir: str) -> int:
+        """根据照片命名特征检测来源类型，返回合适的匹配阈值（秒）
+        
+        手机本机拍摄：600秒（10分钟）- 用户需要调整位置、角度
+        专业全景相机：300秒（5分钟）- 操作更快速专业
+        """
+        sample_files = []
+        for root, dirs, files in os.walk(photo_dir):
+            for f in files:
+                if f.lower().endswith(('.jpg', '.jpeg')):
+                    sample_files.append(f)
+            if len(sample_files) >= 10:
+                break
+        
+        if not sample_files:
+            return 300  # 默认阈值
+        
+        # 统计各种命名特征
+        phone_patterns = 0
+        camera_patterns = 0
+        
+        for f in sample_files[:20]:  # 检查前20个样本
+            name_lower = f.lower()
+            # 手机特征
+            if any(p in name_lower for p in ['img_', 'screenshot', 'wx_camera', 'dcim', 'camera']):
+                phone_patterns += 1
+            # 专业相机特征
+            elif any(p in name_lower for p in ['cam_', 'dji', 'gopro', 'panorama']):
+                camera_patterns += 1
+        
+        # 如果超过50%是手机命名特征，使用更宽松的阈值
+        total_checked = len(sample_files[:20])
+        if phone_patterns / total_checked > 0.3:
+            print(f"[调试] 检测到手机拍摄照片，使用宽松阈值 600 秒")
+            return 600
+        
+        print(f"[调试] 使用标准阈值 300 秒")
+        return 300
     
     def _on_import_progress(self, progress: int, message: str):
         """导入进度更新"""
         self.progress_dialog.setValue(progress)
         self.progress_dialog.setLabelText(message)
+    
+    def _on_import_status_update(self, status: str):
+        """导入状态更新"""
+        if hasattr(self, 'import_status_label'):
+            self.import_status_label.setText(status)
+    
+    def _one_key_anchor(self):
+        """一键锚点 - 手动指定锚点照片来校准时间偏移
+        
+        流程:
+        1. 选择照片目录（如果没有已选目录）
+        2. 选择一个锚点照片（外设拍摄）
+        3. 选择对应的采集点位
+        4. 自动计算偏移
+        5. 重新运行导入
+        """
+        if not self.project_data:
+            QMessageBox.warning(self, "提示", "请先打开项目")
+            return
+        
+        # 1. 确定照片目录
+        photo_dir = getattr(self, '_pending_photo_dir', None)
+        if not photo_dir:
+            photo_dir = getattr(self.project_data, 'photoDir', None)
+        
+        if not photo_dir:
+            photo_dir = QFileDialog.getExistingDirectory(
+                self, "选择照片文件夹"
+            )
+            if not photo_dir:
+                return
+            self._pending_photo_dir = photo_dir
+        
+        # 2. 选择锚点照片
+        photo_path, _ = QFileDialog.getOpenFileName(
+            self, "选择锚点照片（外设拍摄）",
+            photo_dir,
+            "图片文件 (*.jpg *.jpeg *.png)"
+        )
+        if not photo_path:
+            return
+        
+        # 3. 获取锚点照片的EXIF时间
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        anchor_exif_time = None
+        try:
+            img = Image.open(photo_path)
+            exif_data = img._getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    if tag == 'DateTimeOriginal':
+                        anchor_exif_time = datetime.strptime(value, "%Y:%m:%d %H:%M:%S")
+                        break
+        except Exception as e:
+            print(f"[锚点] 获取EXIF时间失败: {e}")
+        
+        if not anchor_exif_time:
+            QMessageBox.warning(self, "错误", "无法读取照片EXIF时间")
+            return
+        
+        # 4. 选择对应的采集点位（从captured状态的点位中选择）
+        captured_markers = []
+        for floor in self.project_data.floors:
+            for m in floor.get('markers', []):
+                if m.get('status') == 'captured':
+                    captured_markers.append(m)
+        
+        if not captured_markers:
+            QMessageBox.warning(self, "错误", "没有已采集的点位可供选择")
+            return
+        
+        # 创建选择对话框
+        from PyQt6.QtWidgets import QInputDialog
+        marker_names = []
+        marker_map = {}
+        for m in captured_markers:
+            name = m.get('customName', m.get('id', '未知'))
+            time_info = m.get('captureTime', m.get('startTime', ''))
+            label = f"{name} ({time_info})" if time_info else name
+            marker_names.append(label)
+            marker_map[label] = m
+        
+        selected, ok = QInputDialog.getItem(
+            self, "选择锚点点位",
+            "请选择与该照片对应的采集点位:",
+            marker_names, 0, False
+        )
+        if not ok or not selected:
+            return
+        
+        selected_marker = marker_map[selected]
+        
+        # 5. 获取点位时间
+        marker_time = None
+        marker = Marker.from_dict(selected_marker)
+        time_range = marker.get_time_range()
+        if time_range:
+            marker_time = time_range[0]
+            if marker_time.tzinfo:
+                marker_time = marker_time.replace(tzinfo=None)
+        
+        if not marker_time:
+            QMessageBox.warning(self, "错误", "无法获取点位时间信息")
+            return
+        
+        # 6. 计算偏移
+        offset_seconds = (anchor_exif_time - marker_time).total_seconds()
+        hours = round(offset_seconds / 3600)
+        offset_hours = int(hours * 3600)
+        
+        print(f"[锚点] 计算偏移: 照片时间={anchor_exif_time}, 点位时间={marker_time}, 偏移={offset_seconds}秒 ({hours:.1f}小时)")
+        
+        # 7. 更新校准值
+        self.project_data.timeOffset = offset_hours
+        print(f"[锚点] 应用校准值: {offset_hours} 秒 ({hours:.1f}小时)")
+        
+        # 8. 显示确认对话框
+        confirm = QMessageBox.question(
+            self, "确认校准",
+            f"计算得到的时间偏移: {offset_hours} 秒 ({hours:.1f} 小时)\n\n"
+            f"是否使用此偏移重新导入照片？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if confirm == QMessageBox.StandardButton.Yes:
+            # 9. 重新运行导入
+            if photo_dir and self.project_data:
+                self._start_import(photo_dir, self.project_data.timeOffset)
+            else:
+                QMessageBox.information(self, "提示", "请先执行【📷 导入影像】选择照片目录")
     
     def _on_import_complete(self, results: dict):
         """导入完成"""
@@ -2225,44 +2730,61 @@ class PanoramaManager(QMainWindow):
         if self.project_data:
             self._add_to_history(self.project_dir, self.project_data.projectName)
         
-        total = results['exact'] + results['similar'] + results['missing']
-        match_rate = (results['exact'] + results['similar']) / total * 100 if total > 0 else 0
-        
-        msg = f"""导入完成！
-
-✅ EXIF精确匹配: {results['exact']} 个
-⚠️ 文件名相似匹配: {results['similar']} 个
-❌ 未找到: {results['missing']} 个
-📊 匹配率: {match_rate:.1f}%
-
-当前校准值: {self.project_data.timeOffset} 秒
-"""
-        
-        # 如果匹配率低，自动应用校准并提示
-        if match_rate < 50 and results['missing'] > 0:
-            msg += "\n\n匹配率较低，正在自动调整时间校准..."
+        # 处理新旧两种结果格式兼容
+        if 'local_matched' in results:
+            # 新格式（本机拍摄/外设照片分类）
+            local_matched = results.get('local_matched', 0)
+            external_matched = results.get('external_matched', 0)
+            auto_offset = results.get('auto_offset', 0)
+            total_linked = local_matched + external_matched
+            missing = results.get('missing', 0)
+            total = total_linked + missing
             
-            # 检查是否检测到大时间差
-            suggested_offset = None
-            if hasattr(self.import_thread, '_suggested_offset'):
-                suggested_offset = self.import_thread._suggested_offset
-                hours = abs(suggested_offset) // 3600
-                minutes = (abs(suggested_offset) % 3600) // 60
-                time_diff_str = f"{hours}小时" if hours > 0 else f"{minutes}分钟"
-                if hours > 0 and minutes > 0:
-                    time_diff_str = f"{hours}小时{minutes}分钟"
-                
-                # 自动应用校准值
-                self.project_data.timeOffset = suggested_offset
-                self._save_project()
-                self.calibration_label.setText(f"{suggested_offset}秒 (相机慢)")
-                
-                msg += f"\n\n检测到相机时间与手机时间相差约 {time_diff_str}。"
-                msg += f"\n系统已自动设置校准值为: {suggested_offset} 秒"
-                msg += "\n\n【建议】调整相机时间设置，使相机与手机时间保持一致。"
+            # 计算关联率：使用总处理数（已关联 + 未找到）作为分母
+            total_processed = total_linked + missing
+            match_rate = total_linked / total_processed * 100 if total_processed > 0 else 0
+            
+            offset_info = ""
+            if auto_offset != 0:
+                hours = auto_offset / 3600
+                offset_info = f"\n🔧 自动偏移: {auto_offset}秒 ({hours:+.1f}小时)"
+            
+            msg = f"""📷 影像导入完成！
+
+🏠 本机拍摄自动关联: {local_matched} 个
+📱 外设照片时间匹配: {external_matched} 个
+✅ 总关联: {total_linked} 个
+❌ 未找到: {missing} 个
+📊 关联率: {match_rate:.1f}%{offset_info}
+
+💾 照片关联方式: 仅记录文件路径，无文件复制
+📁 当前校准值: {self.project_data.timeOffset} 秒
+"""
+            
+            if match_rate < 50 and missing > 0:
+                msg += "\n💡 提示: 可使用【⚓ 一键锚点】功能手动校准"
             
             QMessageBox.information(self, "导入结果", msg)
         else:
+            # 旧格式兼容
+            total = results.get('exact', 0) + results.get('similar', 0) + results.get('missing', 0)
+            match_rate = (results.get('exact', 0) + results.get('similar', 0)) / total * 100 if total > 0 else 0
+            
+            msg = f"""导入完成！
+
+✅ EXIF精确匹配: {results.get('exact', 0)} 个
+⚠️ 文件名相似匹配: {results.get('similar', 0)} 个
+❌ 未找到: {results.get('missing', 0)} 个
+📊 匹配率: {match_rate:.1f}%
+
+💾 照片关联方式: 仅记录文件路径，无文件复制
+📁 当前校准值: {self.project_data.timeOffset} 秒
+"""
+            
+            # 如果匹配率低，自动应用校准并提示
+            if match_rate < 50 and results.get('missing', 0) > 0:
+                msg += "\n\n💡 提示: 可使用【⚓ 一键锚点】功能手动校准"
+            
             QMessageBox.information(self, "导入结果", msg)
         
         # 刷新显示
@@ -2334,15 +2856,24 @@ class PanoramaManager(QMainWindow):
     
     def _auto_generate_and_open_viewer(self):
         """自动生成本地网页并打开 - 不复制照片"""
-        if not self.project_dir or not self.project_data:
+        print("[调试] _auto_generate_and_open_viewer 开始执行...")
+        
+        if not self.project_dir:
+            print("[调试] 错误: project_dir 为空")
+            return
+        
+        if not self.project_data:
+            print("[调试] 错误: project_data 为空")
             return
         
         # 固定生成到项目目录下的 viewer 文件夹
         viewer_dir = os.path.join(self.project_dir, 'viewer')
+        print(f"[调试] viewer_dir: {viewer_dir}")
         
         try:
             # 创建目录结构
             os.makedirs(viewer_dir, exist_ok=True)
+            print(f"[调试] 目录创建成功: {viewer_dir}")
             
             # 处理外部照片目录（不复制照片）
             photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
@@ -2354,31 +2885,62 @@ class PanoramaManager(QMainWindow):
                     if os.path.islink(external_photos_link) or os.path.isdir(external_photos_link):
                         os.remove(external_photos_link) if os.path.islink(external_photos_link) else shutil.rmtree(external_photos_link)
                 # 创建 junction (Windows) 或符号链接
+                link_created = False
                 try:
                     if sys.platform == 'win32':
                         import subprocess
-                        subprocess.run(['cmd', '/c', 'mklink', '/J', external_photos_link, photo_base_dir], check=True, capture_output=True)
+                        link_arg = external_photos_link.replace('/', '\\')
+                        target_arg = photo_base_dir.replace('/', '\\')
+                        result = subprocess.run(['cmd', '/c', 'mklink', '/J', link_arg, target_arg], check=True, capture_output=True)
+                        if result.returncode == 0:
+                            link_created = True
                     else:
                         os.symlink(photo_base_dir, external_photos_link)
+                        link_created = True
+                except subprocess.CalledProcessError as e:
+                    stderr = e.stderr.decode('gbk', errors='ignore') if e.stderr else str(e)
+                    print(f"[警告] 创建目录联接失败: {stderr}")
+                    # 检查是否权限不足
+                    if sys.platform == 'win32' and ('权限' in stderr or 'access' in stderr.lower() or 'denied' in stderr.lower()):
+                        QMessageBox.warning(
+                            self, "权限提示",
+                            "创建照片目录联接需要管理员权限。\n\n"
+                            "系统将自动回退到【照片复制模式】，"
+                            "这可能会占用较多磁盘空间。\n\n"
+                            "如需使用联接模式节省空间，请右键选择「以管理员身份运行」本程序。"
+                        )
                 except Exception as e:
-                    print(f"[警告] 创建照片链接失败: {e}，将尝试复制")
-                    shutil.copytree(photo_base_dir, external_photos_link, dirs_exist_ok=True)
+                    print(f"[警告] 创建照片链接失败: {e}")
+                
+                if not link_created:
+                    try:
+                        shutil.copytree(photo_base_dir, external_photos_link, dirs_exist_ok=True)
+                        print("[信息] 已回退到照片复制模式")
+                    except Exception as copy_err:
+                        print(f"[错误] 照片复制也失败了: {copy_err}")
+                        QMessageBox.critical(self, "错误", f"无法创建照片链接或复制照片:\n{copy_err}")
             
             # 复制项目数据，调整 panoramaPath
             project_copy = self.project_data.to_dict()
+            print(f"[调试] 处理 panoramaPath，photo_base_dir: {photo_base_dir}")
+            linked_count = 0
             if photo_base_dir and os.path.exists(photo_base_dir):
                 for floor_data in project_copy.get('floors', []):
                     for marker_data in floor_data.get('markers', []):
-                        if marker_data.get('panoramaPath') and not os.path.isabs(marker_data['panoramaPath']):
-                            marker_data['panoramaPath'] = 'external_photos/' + marker_data['panoramaPath']
-                        elif marker_data.get('originalPhotoPath'):
-                            orig = marker_data['originalPhotoPath']
-                            if os.path.commonpath([os.path.abspath(orig), os.path.abspath(photo_base_dir)]) == os.path.abspath(photo_base_dir):
-                                rel = os.path.relpath(orig, photo_base_dir).replace('\\', '/')
-                                marker_data['panoramaPath'] = 'external_photos/' + rel
+                        old_path = marker_data.get('panoramaPath', '')
+                        if marker_data.get('status') == 'linked' and old_path:
+                            marker_data['panoramaPath'] = self._resolve_marker_panorama_path(marker_data, photo_base_dir)
+                            new_path = marker_data['panoramaPath']
+                            if new_path:
+                                linked_count += 1
+                                print(f"[调试]   {marker_data.get('customName') or marker_data.get('id')}: {old_path[:40]}... -> {new_path[:40]}...")
+                            else:
+                                print(f"[警告]   {marker_data.get('customName') or marker_data.get('id')}: 路径解析为空!")
+            print(f"[调试] 共处理 {linked_count} 个已关联标记点")
             
             with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
                 json.dump(project_copy, f, ensure_ascii=False, indent=2)
+                print(f"[调试] project.json 已保存")
             
             # 复制各楼层平面图
             for floor_data in self.project_data.floors:
@@ -2406,14 +2968,22 @@ class PanoramaManager(QMainWindow):
     
     def _auto_start_server(self, viewer_dir: str):
         """自动启动 HTTP 服务器并打开浏览器"""
+        print(f"[调试] _auto_start_server 开始，viewer_dir: {viewer_dir}")
+        
         # 先停止已有服务器
         if self.server_thread and self.server_thread.is_running:
+            print("[调试] 停止已有服务器...")
             self.stop_http_server()
+        
+        # 获取照片根目录，传递给 HTTP 服务器用于 direct mapping
+        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '') if self.project_data else ''
+        print(f"[调试] photo_base_dir: {photo_base_dir}")
         
         # 尝试不同端口（跳过 8080，因为经常被占用）
         for port in [8888, 9000, 9999, 0]:
             try:
-                self.server_thread = HttpServerThread(viewer_dir, port)
+                print(f"[调试] 尝试启动端口: {port}")
+                self.server_thread = HttpServerThread(viewer_dir, port, photo_base_dir=photo_base_dir)
                 self.server_thread.server_started.connect(self._on_auto_server_started)
                 self.server_thread.error_occurred.connect(self._on_server_error)
                 self.server_thread.start()
@@ -2421,11 +2991,17 @@ class PanoramaManager(QMainWindow):
                 import time
                 time.sleep(0.5)
                 if self.server_thread.is_running:
+                    print(f"[调试] 端口 {port} 启动成功")
                     break
+                else:
+                    print(f"[调试] 端口 {port} 未进入运行状态")
             except Exception as e:
                 print(f"[调试] 端口 {port} 启动失败: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         else:
+            print("[错误] 所有端口启动失败")
             QMessageBox.critical(self, "错误", "无法启动服务器，所有端口都被占用")
     
     def _on_auto_server_started(self, ip: str, port: int):
@@ -2495,9 +3071,15 @@ class PanoramaManager(QMainWindow):
             self.marker_info_group.setEnabled(True)
             self.marker_id_label.setText(self.current_marker.id)
             self.marker_status_label.setText(self.current_marker.status)
-            self.marker_filename_label.setText(self.current_marker.cameraFileName or '-')
+            self.marker_filename_edit.setText(self.current_marker.cameraFileName or '-')
             self.marker_custom_name.setText(self.current_marker.customName)
             self.marker_coord_label.setText(f"({self.current_marker.x:.4f}, {self.current_marker.y:.4f})")
+            
+            # 更新按钮状态
+            has_photo = bool(self.current_marker.originalPhotoPath or self.current_marker.panoramaPath)
+            self.open_photo_folder_btn.setEnabled(has_photo)
+            self.pick_photo_btn.setEnabled(True)
+            self.delete_marker_btn.setEnabled(True)
     
     def _create_floor_tabs(self):
         """创建楼层切换标签"""
@@ -2647,7 +3229,9 @@ class PanoramaManager(QMainWindow):
                 try:
                     if sys.platform == 'win32':
                         import subprocess
-                        subprocess.run(['cmd', '/c', 'mklink', '/J', external_photos_link, photo_base_dir], check=True, capture_output=True)
+                        link_arg = external_photos_link.replace('/', '\\')
+                        target_arg = photo_base_dir.replace('/', '\\')
+                        subprocess.run(['cmd', '/c', 'mklink', '/J', link_arg, target_arg], check=True, capture_output=True)
                     else:
                         os.symlink(photo_base_dir, external_photos_link)
                 except Exception as e:
@@ -2660,15 +3244,7 @@ class PanoramaManager(QMainWindow):
             if photo_base_dir and os.path.exists(photo_base_dir):
                 for floor_data in project_copy.get('floors', []):
                     for marker_data in floor_data.get('markers', []):
-                        if marker_data.get('panoramaPath') and not os.path.isabs(marker_data['panoramaPath']):
-                            # 相对路径，加上 external_photos 前缀
-                            marker_data['panoramaPath'] = 'external_photos/' + marker_data['panoramaPath']
-                        elif marker_data.get('originalPhotoPath'):
-                            # 有原始路径，尝试转为相对路径
-                            orig = marker_data['originalPhotoPath']
-                            if os.path.commonpath([os.path.abspath(orig), os.path.abspath(photo_base_dir)]) == os.path.abspath(photo_base_dir):
-                                rel = os.path.relpath(orig, photo_base_dir).replace('\\', '/')
-                                marker_data['panoramaPath'] = 'external_photos/' + rel
+                        marker_data['panoramaPath'] = self._resolve_marker_panorama_path(marker_data, photo_base_dir)
             
             with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
                 json.dump(project_copy, f, ensure_ascii=False, indent=2)
@@ -2711,28 +3287,24 @@ class PanoramaManager(QMainWindow):
             # 查找平面图文件
             floorplan_path = f"floorplan_{floor_id}.jpg"
             
-            # 收集该楼层已关联的标记点
+            # 收集该楼层所有标记点（不限制状态，让查看器显示所有点位）
             photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
-            linked_markers = []
+            all_markers = []
             for m in floor_data.get('markers', []):
+                marker_copy = dict(m)
+                # 只有已关联的才需要处理 panoramaPath
                 if m.get('status') == 'linked' and m.get('panoramaPath'):
-                    marker_copy = dict(m)
-                    path = marker_copy.get('panoramaPath', '')
-                    orig = marker_copy.get('originalPhotoPath', '')
                     if photo_base_dir and os.path.exists(photo_base_dir):
-                        if path and not os.path.isabs(path):
-                            marker_copy['panoramaPath'] = 'external_photos/' + path
-                        elif orig and os.path.commonpath([os.path.abspath(orig), os.path.abspath(photo_base_dir)]) == os.path.abspath(photo_base_dir):
-                            rel = os.path.relpath(orig, photo_base_dir).replace('\\', '/')
-                            marker_copy['panoramaPath'] = 'external_photos/' + rel
-                    linked_markers.append(marker_copy)
+                        marker_copy['panoramaPath'] = self._resolve_marker_panorama_path(marker_copy, photo_base_dir)
+                all_markers.append(marker_copy)
             
-            if linked_markers:
+            # 只要有平面图或标记点就加入楼层
+            if floorplan_path or all_markers:
                 floors_js.append({
                     'id': floor_id,
                     'name': floor_name,
                     'floorplan': floorplan_path,
-                    'markers': linked_markers
+                    'markers': all_markers
                 })
         
         floors_json = json.dumps(floors_js, ensure_ascii=False)
@@ -2746,6 +3318,7 @@ class PanoramaManager(QMainWindow):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>__PROJECT_NAME__ - 影像查看器</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css"/>
     <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
     <style>
@@ -2885,6 +3458,9 @@ class PanoramaManager(QMainWindow):
             background: #FFCC00;
             animation: pulse 1.5s infinite;
         }
+        .marker-dot.pending { background: #FF3B30; }
+        .marker-dot.missing { background: #8E8E93; }
+        .marker-dot.captured { background: #0A84FF; }
         @keyframes pulse {
             0% { box-shadow: 0 0 0 0 rgba(255, 204, 0, 0.7); }
             70% { box-shadow: 0 0 0 12px rgba(255, 204, 0, 0); }
@@ -3027,6 +3603,61 @@ class PanoramaManager(QMainWindow):
         
         .gyro-hint.show { opacity: 1; }
         
+        /* 图片查看模式 */
+        #photoViewer {
+            display: none;
+            width: 100%;
+            height: 100%;
+            position: relative;
+            overflow: hidden;
+            background: #000;
+            align-items: center;
+            justify-content: center;
+        }
+        #photoViewer.active { display: flex; }
+        #photoViewer img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            transition: transform 0.1s ease-out;
+            user-select: none;
+            -webkit-user-drag: none;
+        }
+        .photo-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(0,0,0,0.6);
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 55;
+            backdrop-filter: blur(4px);
+        }
+        .photo-nav:hover { background: rgba(0,0,0,0.85); }
+        .photo-nav.prev { left: 15px; }
+        .photo-nav.next { right: 15px; }
+        .photo-counter {
+            position: absolute;
+            bottom: 70px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.6);
+            color: white;
+            padding: 6px 14px;
+            border-radius: 16px;
+            font-size: 13px;
+            z-index: 55;
+            backdrop-filter: blur(4px);
+        }
+        
         /* 移动端适配 */
         @media (max-width: 768px) {
             .container { flex-direction: column; }
@@ -3095,8 +3726,17 @@ class PanoramaManager(QMainWindow):
                 <div class="floor-name" id="current-floor">-</div>
             </div>
             <div id="panorama"></div>
+            <div id="photoViewer">
+                <button class="photo-nav prev" id="photoPrev" onclick="prevPhoto()" title="上一张">◀</button>
+                <img id="photoImg" src="" alt="照片" draggable="false">
+                <button class="photo-nav next" id="photoNext" onclick="nextPhoto()" title="下一张">▶</button>
+                <div class="photo-counter" id="photoCounter">1 / 1</div>
+            </div>
             <div class="gyro-hint" id="gyroHint">陀螺仪模式已开启，移动手机查看</div>
             <div class="control-buttons">
+                <button class="control-btn" id="viewModeBtn" onclick="toggleViewMode()" title="切换查看模式">
+                    🖼️ <span>图片</span>
+                </button>
                 <button class="control-btn" id="gyroBtn" onclick="toggleGyro()" title="陀螺仪模式">
                     📱 <span>陀螺仪</span>
                 </button>
@@ -3129,7 +3769,7 @@ class PanoramaManager(QMainWindow):
             
             if (!floors || floors.length === 0) {
                 document.getElementById('floorplanContainer').innerHTML = 
-                    '<p style="color: #666;">暂无数据（没有已关联的影像）</p>';
+                    '<p style="color: #666;">暂无楼层数据</p>';
                 return;
             }
             
@@ -3244,7 +3884,8 @@ class PanoramaManager(QMainWindow):
             
             markers.forEach((marker, idx) => {
                 const dot = document.createElement('div');
-                dot.className = 'marker-dot' + (idx === 0 ? ' active' : '');
+                const statusClass = marker.status || 'pending';
+                dot.className = 'marker-dot ' + statusClass + (idx === 0 ? ' active' : '');
                 dot.dataset.markerX = marker.x;
                 dot.dataset.markerY = marker.y;
                 dot.dataset.markerIndex = idx;
@@ -3485,6 +4126,14 @@ class PanoramaManager(QMainWindow):
         let isVREnabled = false;
         let vrViewerLeft = null;
         let vrViewerRight = null;
+        let viewMode = 'auto'; // 'auto' | 'panorama' | 'photo'
+        let currentPhotoIndex = 0;
+        let photoScale = 1;
+        let photoOffsetX = 0;
+        let photoOffsetY = 0;
+        let isPhotoDragging = false;
+        let photoDragStartX = 0;
+        let photoDragStartY = 0;
         
         function loadPanorama(index) {
             const floor = floors[currentFloorIndex];
@@ -3502,17 +4151,73 @@ class PanoramaManager(QMainWindow):
                 dot.classList.toggle('active', idx === index);
             });
             
+            // 如果该点位没有影像，显示提示并清空区域
+            if (!marker.panoramaPath) {
+                if (viewer) viewer.destroy();
+                viewer = null;
+                document.getElementById('panorama').innerHTML = 
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:18px;">该点位暂无影像</div>';
+                document.getElementById('panorama').style.display = 'block';
+                document.getElementById('photoViewer').classList.remove('active');
+                return;
+            }
+            
             // 如果 VR 模式已启用，重新加载 VR 视图
             if (isVREnabled) {
                 loadVRView(marker);
                 return;
             }
             
+            // 确定展示模式
+            const photos = marker.photos || [marker.panoramaPath];
+            const photoCount = photos.length;
+            let mode = viewMode;
+            if (mode === 'auto') {
+                mode = (photoCount === 4) ? 'panorama' : 'photo';
+            }
+            updateViewModeUI(mode);
+            
+            if (mode === 'panorama') {
+                showPanoramaViewer(marker, photos);
+            } else {
+                showPhotoViewer(marker, photos);
+            }
+        }
+        
+        function updateViewModeUI(mode) {
+            const btn = document.getElementById('viewModeBtn');
+            if (mode === 'panorama') {
+                btn.innerHTML = '🌐 <span>全景</span>';
+                btn.classList.add('active');
+            } else {
+                btn.innerHTML = '🖼️ <span>图片</span>';
+                btn.classList.remove('active');
+            }
+        }
+        
+        function toggleViewMode() {
+            const floor = floors[currentFloorIndex];
+            const marker = floor.markers[currentMarkerIndex];
+            if (!marker.panoramaPath) return;
+            
+            const photos = marker.photos || [marker.panoramaPath];
+            if (viewMode === 'auto') {
+                viewMode = 'panorama';
+            } else if (viewMode === 'panorama') {
+                viewMode = 'photo';
+            } else {
+                viewMode = 'auto';
+            }
+            loadPanorama(currentMarkerIndex);
+        }
+        
+        function showPanoramaViewer(marker, photos) {
+            document.getElementById('panorama').style.display = 'block';
+            document.getElementById('photoViewer').classList.remove('active');
+            
             if (viewer) viewer.destroy();
             
-            viewer = pannellum.viewer('panorama', {
-                type: 'equirectangular',
-                panorama: marker.panoramaPath,
+            const config = {
                 autoLoad: true,
                 compass: true,
                 showFullscreenCtrl: true,
@@ -3522,23 +4227,140 @@ class PanoramaManager(QMainWindow):
                 friction: 0.1,
                 mouseZoom: true,
                 draggable: true
-            });
+            };
             
-            // 如果启用了陀螺仪，强制启用设备方向控制
+            if (photos.length === 4) {
+                // 4张照片使用 cubeMap 模式
+                config.type = 'cubemap';
+                config.cubeMap = photos;
+            } else {
+                // 单张照片使用 equirectangular 模式
+                config.type = 'equirectangular';
+                config.panorama = photos[0];
+            }
+            
+            viewer = pannellum.viewer('panorama', config);
+            
             if (isGyroEnabled && viewer) {
-                // 延迟启用陀螺仪，确保查看器已初始化
                 setTimeout(() => {
-                    try {
-                        // 尝试启用设备方向控制
-                        if (viewer.enableOrientation) {
-                            viewer.enableOrientation();
-                        }
-                    } catch(e) {
-                        console.log('启用陀螺仪控制:', e);
-                    }
+                    try { if (viewer.enableOrientation) viewer.enableOrientation(); }
+                    catch(e) { console.log('启用陀螺仪控制:', e); }
                 }, 100);
             }
         }
+        
+        function showPhotoViewer(marker, photos) {
+            document.getElementById('panorama').style.display = 'none';
+            if (viewer) { viewer.destroy(); viewer = null; }
+            
+            const photoViewer = document.getElementById('photoViewer');
+            photoViewer.classList.add('active');
+            currentPhotoIndex = 0;
+            photoScale = 1;
+            photoOffsetX = 0;
+            photoOffsetY = 0;
+            renderPhoto(photos);
+        }
+        
+        function renderPhoto(photos) {
+            const img = document.getElementById('photoImg');
+            const prevBtn = document.getElementById('photoPrev');
+            const nextBtn = document.getElementById('photoNext');
+            const counter = document.getElementById('photoCounter');
+            
+            img.src = photos[currentPhotoIndex];
+            img.style.transform = 'translate(0px, 0px) scale(1)';
+            photoScale = 1;
+            photoOffsetX = 0;
+            photoOffsetY = 0;
+            
+            const showNav = photos.length > 1;
+            prevBtn.style.display = showNav ? 'flex' : 'none';
+            nextBtn.style.display = showNav ? 'flex' : 'none';
+            counter.style.display = showNav ? 'block' : 'none';
+            counter.textContent = (currentPhotoIndex + 1) + ' / ' + photos.length;
+        }
+        
+        function nextPhoto() {
+            const floor = floors[currentFloorIndex];
+            const marker = floor.markers[currentMarkerIndex];
+            const photos = marker.photos || [marker.panoramaPath];
+            if (photos.length <= 1) return;
+            currentPhotoIndex = (currentPhotoIndex + 1) % photos.length;
+            renderPhoto(photos);
+        }
+        
+        function prevPhoto() {
+            const floor = floors[currentFloorIndex];
+            const marker = floor.markers[currentMarkerIndex];
+            const photos = marker.photos || [marker.panoramaPath];
+            if (photos.length <= 1) return;
+            currentPhotoIndex = (currentPhotoIndex - 1 + photos.length) % photos.length;
+            renderPhoto(photos);
+        }
+        
+        // 图片查看器缩放和拖动事件
+        (function setupPhotoViewerEvents() {
+            const viewerEl = document.getElementById('photoViewer');
+            const img = document.getElementById('photoImg');
+            
+            viewerEl.addEventListener('wheel', function(e) {
+                if (!viewerEl.classList.contains('active')) return;
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                photoScale = Math.max(0.5, Math.min(5, photoScale * delta));
+                img.style.transform = 'translate(' + photoOffsetX + 'px, ' + photoOffsetY + 'px) scale(' + photoScale + ')';
+            }, { passive: false });
+            
+            img.addEventListener('mousedown', function(e) {
+                if (!viewerEl.classList.contains('active')) return;
+                isPhotoDragging = true;
+                photoDragStartX = e.clientX - photoOffsetX;
+                photoDragStartY = e.clientY - photoOffsetY;
+                img.style.cursor = 'grabbing';
+            });
+            
+            document.addEventListener('mousemove', function(e) {
+                if (!isPhotoDragging) return;
+                e.preventDefault();
+                photoOffsetX = e.clientX - photoDragStartX;
+                photoOffsetY = e.clientY - photoDragStartY;
+                img.style.transform = 'translate(' + photoOffsetX + 'px, ' + photoOffsetY + 'px) scale(' + photoScale + ')';
+            });
+            
+            document.addEventListener('mouseup', function() {
+                isPhotoDragging = false;
+                img.style.cursor = 'grab';
+            });
+            
+            // 触摸支持
+            img.addEventListener('touchstart', function(e) {
+                if (!viewerEl.classList.contains('active') || e.touches.length !== 1) return;
+                isPhotoDragging = true;
+                photoDragStartX = e.touches[0].clientX - photoOffsetX;
+                photoDragStartY = e.touches[0].clientY - photoOffsetY;
+            }, { passive: false });
+            
+            document.addEventListener('touchmove', function(e) {
+                if (!isPhotoDragging || e.touches.length !== 1) return;
+                e.preventDefault();
+                photoOffsetX = e.touches[0].clientX - photoDragStartX;
+                photoOffsetY = e.touches[0].clientY - photoDragStartY;
+                img.style.transform = 'translate(' + photoOffsetX + 'px, ' + photoOffsetY + 'px) scale(' + photoScale + ')';
+            }, { passive: false });
+            
+            document.addEventListener('touchend', function() {
+                isPhotoDragging = false;
+            });
+            
+            img.addEventListener('dblclick', function() {
+                if (!viewerEl.classList.contains('active')) return;
+                photoScale = 1;
+                photoOffsetX = 0;
+                photoOffsetY = 0;
+                img.style.transform = 'translate(0px, 0px) scale(1)';
+            });
+        })();
         
         // 切换陀螺仪模式
         function toggleGyro() {
@@ -3672,9 +4494,8 @@ class PanoramaManager(QMainWindow):
             if (vrViewerLeft) vrViewerLeft.destroy();
             if (vrViewerRight) vrViewerRight.destroy();
             
+            const photos = marker.photos || [marker.panoramaPath];
             const baseConfig = {
-                type: 'equirectangular',
-                panorama: marker.panoramaPath,
                 autoLoad: true,
                 compass: false,
                 showFullscreenCtrl: false,
@@ -3687,13 +4508,21 @@ class PanoramaManager(QMainWindow):
                 sceneFadeDuration: 0
             };
             
+            if (photos.length === 4) {
+                baseConfig.type = 'cubemap';
+                baseConfig.cubeMap = photos;
+            } else {
+                baseConfig.type = 'equirectangular';
+                baseConfig.panorama = photos[0];
+            }
+            
             // 左眼视图（稍微向左偏移）
             vrViewerLeft = pannellum.viewer('vrLeft', {
                 ...baseConfig,
                 haov: 360,
                 vaov: 180,
                 hfov: 100,
-                yaw: -5  // 左眼稍微向左看
+                yaw: -5
             });
             
             // 右眼视图（稍微向右偏移，模拟瞳距）
@@ -3702,7 +4531,7 @@ class PanoramaManager(QMainWindow):
                 haov: 360,
                 vaov: 180,
                 hfov: 100,
-                yaw: 5  // 右眼稍微向右看
+                yaw: 5
             });
             
             // 同步左右眼视角
@@ -3859,27 +4688,61 @@ class PanoramaManager(QMainWindow):
             QMessageBox.warning(self, "提示", "网页查看器尚未生成，请先点击'生成本地网页'")
             return
         
-        # 先停止已有服务器
+        # 先停止已有服务器并等待完全关闭
         if self.server_thread and self.server_thread.is_running:
             self.stop_http_server()
+            # 等待旧服务器端口释放，避免 Windows 上 SO_REUSEADDR 导致的竞争
+            import time
+            time.sleep(1.0)
+        
+        # 获取照片根目录，传递给 HTTP 服务器用于 direct mapping
+        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '') if self.project_data else ''
         
         # 尝试不同端口（跳过 8080，因为经常被占用）
         for port in [8888, 9000, 9999, 0]:
             try:
-                self.server_thread = HttpServerThread(viewer_dir, port)
+                self.server_thread = HttpServerThread(viewer_dir, port, photo_base_dir=photo_base_dir)
                 self.server_thread.server_started.connect(self._on_server_started)
                 self.server_thread.error_occurred.connect(self._on_server_error)
                 self.server_thread.start()
-                # 等待一下看是否启动成功
+                # 等待线程启动并实际开始 serve_forever
                 import time
-                time.sleep(0.5)
-                if self.server_thread.is_running:
+                time.sleep(0.8)
+                if not self.server_thread.is_running:
+                    print(f"[调试] 端口 {port} 线程未进入运行状态，尝试下一个端口")
+                    continue
+                # 实际发送一个 HTTP 请求验证服务器是否真正在响应
+                verified = False
+                for _ in range(5):
+                    try:
+                        import urllib.request
+                        test_url = f"http://127.0.0.1:{port}/"
+                        req = urllib.request.Request(test_url, method='HEAD')
+                        req.add_header('User-Agent', 'PanoramaManager/1.0')
+                        with urllib.request.urlopen(req, timeout=1.0) as resp:
+                            if resp.status in (200, 404):
+                                verified = True
+                                print(f"[调试] 端口 {port} 验证通过，HTTP {resp.status}")
+                                break
+                    except Exception as probe_err:
+                        print(f"[调试] 端口 {port} 探测中: {probe_err}")
+                        time.sleep(0.3)
+                if verified:
                     break
+                else:
+                    print(f"[调试] 端口 {port} 未能验证通过，尝试下一个端口")
+                    # 强制停止未验证通过的线程
+                    try:
+                        self.server_thread.stop()
+                    except Exception:
+                        pass
+                    self.server_thread = None
+                    time.sleep(0.5)
             except Exception as e:
                 print(f"[调试] 端口 {port} 启动失败: {e}")
                 continue
         else:
-            QMessageBox.critical(self, "错误", "无法启动服务器，所有端口都被占用")
+            QMessageBox.critical(self, "错误", "无法启动服务器，所有端口都被占用或无法响应")
             return
     
     def _on_server_started(self, ip: str, port: int):
@@ -3967,6 +4830,7 @@ class PanoramaManager(QMainWindow):
         if self.server_thread:
             # 在后台线程中停止服务器，避免阻塞 GUI 导致窗口卡死
             import threading
+            import time
             old_thread = self.server_thread
             self.server_thread = None
             def do_stop():
@@ -3976,8 +4840,14 @@ class PanoramaManager(QMainWindow):
                     print(f"[调试] 停止服务器异常: {e}")
             t = threading.Thread(target=do_stop, daemon=True)
             t.start()
-            # 最多等待1秒
-            t.join(timeout=1.0)
+            # 最多等待3秒，确保服务器完全关闭
+            t.join(timeout=3.0)
+            if t.is_alive():
+                print("[调试] 警告: 服务器停止超时，可能仍在后台运行")
+            else:
+                print("[调试] 服务器已完全停止")
+            # 额外等待端口释放
+            time.sleep(0.5)
         
         self.server_info_group.setVisible(False)
         self.stop_server_btn.setEnabled(False)
@@ -4063,6 +4933,115 @@ class PanoramaManager(QMainWindow):
         elif action == relink_action:
             self._relink_marker_photo(marker_id)
 
+    def _find_photo_base_dir(self, search_dir: str = None) -> str:
+        """智能查找照片根目录：优先 photoBaseDir，其次扫描指定目录或项目附近的照片文件夹"""
+        # 1. 优先使用已设置的 photoBaseDir
+        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+        if photo_base_dir and os.path.exists(photo_base_dir):
+            return photo_base_dir
+        
+        # 2. 如果指定了搜索目录，先扫描该目录
+        if search_dir and os.path.exists(search_dir):
+            best_dir = None
+            best_count = 0
+            for item in os.listdir(search_dir):
+                item_path = os.path.join(search_dir, item)
+                if os.path.isdir(item_path) and item.lower() not in ['viewer', '__pycache__', 'build', 'dist', 'src']:
+                    count = 0
+                    for root, _, files in os.walk(item_path):
+                        for f in files:
+                            if f.lower().endswith(('.jpg', '.jpeg')):
+                                count += 1
+                            if count > best_count:
+                                break
+                        if count > best_count:
+                            break
+                    if count > best_count:
+                        best_count = count
+                        best_dir = item_path
+            if best_dir and best_count > 0:
+                return best_dir
+        
+        # 3. 扫描项目目录的同级目录
+        parent_dir = os.path.dirname(self.project_dir) if self.project_dir else ''
+        if parent_dir and os.path.exists(parent_dir):
+            best_dir = None
+            best_count = 0
+            for item in os.listdir(parent_dir):
+                item_path = os.path.join(parent_dir, item)
+                if os.path.isdir(item_path) and item.lower() not in ['viewer', '__pycache__', 'build', 'dist', 'src']:
+                    count = 0
+                    for root, _, files in os.walk(item_path):
+                        for f in files:
+                            if f.lower().endswith(('.jpg', '.jpeg')):
+                                count += 1
+                            if count > best_count:
+                                break
+                        if count > best_count:
+                            break
+                    if count > best_count:
+                        best_count = count
+                        best_dir = item_path
+            if best_dir and best_count > 0:
+                return best_dir
+        
+        # 4. 回退：使用项目目录下的 photos 文件夹
+        fallback = os.path.join(self.project_dir, 'photos') if self.project_dir else ''
+        return fallback
+
+    def _resolve_marker_panorama_path(self, marker_data: dict, photo_base_dir: str) -> str:
+        """基于 photoBaseDir 重新计算 panoramaPath，修复路径冗余和重复前缀问题"""
+        if not photo_base_dir:
+            return marker_data.get('panoramaPath', '')
+        
+        orig = marker_data.get('originalPhotoPath', '')
+        path = marker_data.get('panoramaPath', '')
+        marker_name = marker_data.get('customName') or marker_data.get('id', 'unknown')
+        
+        # 调试信息
+        print(f"[调试] _resolve_marker_panorama_path: marker={marker_name}")
+        print(f"[调试]   originalPhotoPath={orig[:60] if orig else 'None'}")
+        print(f"[调试]   panoramaPath={path[:60] if path else 'None'}")
+        print(f"[调试]   photo_base_dir={photo_base_dir}")
+        
+        # 1. 优先基于 originalPhotoPath 重新计算相对路径（最可靠）
+        if orig and os.path.exists(orig):
+            try:
+                if os.path.commonpath([os.path.abspath(orig), os.path.abspath(photo_base_dir)]) == os.path.abspath(photo_base_dir):
+                    rel = os.path.relpath(orig, photo_base_dir).replace('\\', '/')
+                    return 'external_photos/' + rel
+            except ValueError:
+                pass
+        
+        # 2. 退而使用现有的 panoramaPath
+        if path:
+            # 去掉已有的 external_photos/ 前缀，防止重复
+            if path.startswith('external_photos/'):
+                path = path[len('external_photos/'):]
+            
+            if not os.path.isabs(path):
+                # 如果 photoBaseDir 的 basename 是 photos，且 path 以 photos/ 开头，
+                # 说明之前是基于项目根目录的相对路径，需要去掉 photos/ 层
+                if os.path.basename(photo_base_dir.rstrip('\\/')) == 'photos' and path.startswith('photos/'):
+                    path = path[len('photos/'):]
+                return 'external_photos/' + path
+            else:
+                # 绝对路径，尝试转为相对路径
+                try:
+                    if os.path.commonpath([os.path.abspath(path), os.path.abspath(photo_base_dir)]) == os.path.abspath(photo_base_dir):
+                        rel = os.path.relpath(path, photo_base_dir).replace('\\', '/')
+                        return 'external_photos/' + rel
+                except ValueError:
+                    pass
+                result = path.replace('\\', '/')
+                print(f"[调试]   -> 使用 panoramaPath (绝对): {result}")
+                return result
+        
+        # 3. 如果都无法解析，保留原始值而不是返回空字符串
+        original_path = marker_data.get('panoramaPath', '')
+        print(f"[警告] _resolve_marker_panorama_path: 无法解析路径，保留原值: {original_path}")
+        return original_path
+
     def _delete_marker(self, marker_id: str):
         """删除采集点"""
         if not self.project_data:
@@ -4130,12 +5109,116 @@ class PanoramaManager(QMainWindow):
                     QMessageBox.information(self, "成功", f"已关联照片: {fname}")
                     return
 
+    def _open_photo_folder(self):
+        """打开照片所在文件夹"""
+        if not hasattr(self, 'current_marker') or not self.current_marker:
+            return
+        path = self.current_marker.originalPhotoPath or self.current_marker.panoramaPath
+        if not path:
+            return
+        if not os.path.isabs(path):
+            path = os.path.join(self.project_dir, path)
+        if os.path.exists(path):
+            folder = os.path.dirname(path)
+            if sys.platform == 'win32':
+                os.startfile(folder)
+            else:
+                import subprocess
+                subprocess.call(['open', folder])
+        else:
+            QMessageBox.warning(self, "提示", "照片文件不存在")
+
+    def _show_photo_picker(self):
+        """显示照片选择对话框"""
+        if not hasattr(self, 'current_marker') or not self.current_marker:
+            return
+        photo_base_dir = self._find_photo_base_dir()
+        dialog = PhotoPickerDialog(photo_base_dir, self.current_marker.id, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected_path = dialog.selected_path
+            if selected_path:
+                self._link_photo_to_marker(self.current_marker.id, selected_path)
+
+    def _link_photo_to_marker(self, marker_id: str, file_path: str):
+        """将照片关联到指定点位"""
+        fname = os.path.basename(file_path)
+        photo_base_dir = self._find_photo_base_dir()
+        # 如果 photoBaseDir 不存在（或为空），创建项目目录下的 photos 文件夹
+        if not photo_base_dir or not os.path.exists(photo_base_dir):
+            photo_base_dir = os.path.join(self.project_dir, 'photos')
+            os.makedirs(photo_base_dir, exist_ok=True)
+            self.project_data.photoBaseDir = photo_base_dir
+        for floor_data in self.project_data.floors:
+            for marker_data in floor_data.get('markers', []):
+                if marker_data['id'] == marker_id:
+                    marker_data['cameraFileName'] = fname
+                    marker_data['originalPhotoPath'] = file_path
+                    marker_data['status'] = 'linked'
+                    # 复制照片到 photoBaseDir
+                    try:
+                        target = os.path.join(photo_base_dir, fname)
+                        # 如果目标已存在但路径不同，加后缀避免覆盖
+                        if os.path.exists(target) and os.path.abspath(target) != os.path.abspath(file_path):
+                            base, ext = os.path.splitext(fname)
+                            counter = 1
+                            while os.path.exists(target):
+                                target = os.path.join(photo_base_dir, f"{base}_{counter}{ext}")
+                                counter += 1
+                            fname = os.path.basename(target)
+                        shutil.copy2(file_path, target)
+                        # panoramaPath 存相对于 photoBaseDir 的路径
+                        rel = os.path.relpath(target, photo_base_dir).replace('\\', '/')
+                        marker_data['panoramaPath'] = rel
+                        marker_data['cameraFileName'] = fname
+                        print(f"[调试] 照片已复制到: {target}, panoramaPath: {rel}")
+                    except Exception as e:
+                        print(f"[警告] 复制照片失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    self._on_marker_selected(marker_id)
+                    self.canvas.clear_markers()
+                    self._load_floor(self.current_floor_id)
+                    self.save_changes_btn.setStyleSheet("""
+                        QPushButton {
+                            padding: 12px; font-size: 14px;
+                            background-color: #FF9500; color: white;
+                            border: none; border-radius: 6px;
+                        }
+                        QPushButton:hover { background-color: #B36800; }
+                    """)
+                    self.save_changes_btn.setText("💾 保存修改（已变更）")
+                    return
+
+    def _delete_current_marker(self):
+        """从右侧删除当前选中的点位"""
+        if not hasattr(self, 'current_marker') or not self.current_marker:
+            return
+        self._delete_marker(self.current_marker.id)
+        self.marker_info_group.setEnabled(False)
+
+    def _on_marker_double_clicked(self, marker_id: str):
+        """双击点位替换照片"""
+        photo_base_dir = self._find_photo_base_dir()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择替换的照片", photo_base_dir,
+            "图片文件 (*.jpg *.jpeg *.png *.heic *.heif);;所有文件 (*.*)"
+        )
+        if file_path:
+            self._link_photo_to_marker(marker_id, file_path)
+
     def _save_project_changes(self):
         """保存项目修改到 project.json"""
         if not self.project_dir or not self.project_data:
             return
         try:
             self._save_project()
+            # 如果 viewer 已存在，静默重新生成
+            viewer_dir = os.path.join(self.project_dir, 'viewer')
+            if os.path.exists(viewer_dir):
+                try:
+                    self._regenerate_viewer(viewer_dir)
+                except Exception as e:
+                    print(f"[警告] 重新生成查看器失败: {e}")
             self.save_changes_btn.setStyleSheet("""
                 QPushButton {
                     padding: 12px; font-size: 14px;
@@ -4149,6 +5232,44 @@ class PanoramaManager(QMainWindow):
             QMessageBox.information(self, "成功", "项目修改已保存")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存失败: {e}")
+
+    def _regenerate_viewer(self, viewer_dir: str):
+        """静默重新生成查看器（不弹提示）"""
+        # 处理外部照片目录
+        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+        external_photos_link = os.path.join(viewer_dir, 'external_photos')
+        if photo_base_dir and os.path.exists(photo_base_dir):
+            if os.path.exists(external_photos_link):
+                if os.path.islink(external_photos_link) or os.path.isdir(external_photos_link):
+                    os.remove(external_photos_link) if os.path.islink(external_photos_link) else shutil.rmtree(external_photos_link)
+            try:
+                if sys.platform == 'win32':
+                    import subprocess
+                    link_arg = external_photos_link.replace('/', '\\')
+                    target_arg = photo_base_dir.replace('/', '\\')
+                    subprocess.run(['cmd', '/c', 'mklink', '/J', link_arg, target_arg], check=True, capture_output=True)
+                else:
+                    os.symlink(photo_base_dir, external_photos_link)
+            except Exception:
+                shutil.copytree(photo_base_dir, external_photos_link, dirs_exist_ok=True)
+        # 复制项目数据，调整 panoramaPath
+        project_copy = self.project_data.to_dict()
+        if photo_base_dir and os.path.exists(photo_base_dir):
+            for floor_data in project_copy.get('floors', []):
+                for marker_data in floor_data.get('markers', []):
+                    marker_data['panoramaPath'] = self._resolve_marker_panorama_path(marker_data, photo_base_dir)
+        with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
+            json.dump(project_copy, f, ensure_ascii=False, indent=2)
+        # 复制平面图
+        for floor_data in self.project_data.floors:
+            floor_id = floor_data['id']
+            src = os.path.join(self.project_dir, f'floorplan_{floor_id}.jpg')
+            if not os.path.exists(src) and self.project_data.floorplan:
+                src = os.path.join(self.project_dir, self.project_data.floorplan)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(viewer_dir, f'floorplan_{floor_id}.jpg'))
+        # 生成 HTML
+        self._generate_viewer_html(viewer_dir)
 
     def _export_for_capture(self):
         """导出为采集端可导入的数据包"""
@@ -4227,10 +5348,10 @@ class PanoramaManager(QMainWindow):
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 v1.0</h2>
+            """<h2>随系 · 影像管理器 v1.1</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
-            <p>© 2025 PanoramaManager</p>""")
+            <p>© 2026 PanoramaManager</p>""")
     
     def closeEvent(self, event):
         """关闭窗口时停止服务器"""
@@ -4246,6 +5367,189 @@ class PanoramaManager(QMainWindow):
 # =============================================================================
 # 程序入口
 # =============================================================================
+
+class PhotoPickerDialog(QDialog):
+    """照片选择对话框 - 支持预览和上一张/下一张切换"""
+    def __init__(self, photo_base_dir: str, marker_id: str, parent=None):
+        super().__init__(parent)
+        self.photo_base_dir = photo_base_dir
+        self.marker_id = marker_id
+        self.selected_path = None
+        self.photo_files = []
+        self.current_index = 0
+        
+        self.setWindowTitle("选择照片")
+        self.setMinimumSize(500, 600)
+        self._init_ui()
+        self._scan_photos()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        # 预览区域
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(350)
+        self.preview_label.setStyleSheet("background-color: #1C1C1E; border-radius: 8px;")
+        layout.addWidget(self.preview_label)
+        
+        # 文件名
+        self.filename_label = QLabel("未选择")
+        self.filename_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.filename_label.setStyleSheet("font-size: 13px; color: #666; padding: 4px;")
+        layout.addWidget(self.filename_label)
+        
+        # 导航按钮
+        nav_layout = QHBoxLayout()
+        self.prev_btn = QPushButton("◀ 上一张")
+        self.prev_btn.setStyleSheet("""
+            QPushButton { padding: 10px 20px; font-size: 13px; background-color: #3A3A3C; color: white; border: none; border-radius: 6px; }
+            QPushButton:hover { background-color: #48484A; }
+            QPushButton:disabled { background-color: #ccc; }
+        """)
+        self.prev_btn.clicked.connect(self._show_prev)
+        nav_layout.addWidget(self.prev_btn)
+        
+        self.index_label = QLabel("0 / 0")
+        self.index_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.index_label.setStyleSheet("font-size: 13px; color: #999;")
+        nav_layout.addWidget(self.index_label, 1)
+        
+        self.next_btn = QPushButton("下一张 ▶")
+        self.next_btn.setStyleSheet("""
+            QPushButton { padding: 10px 20px; font-size: 13px; background-color: #3A3A3C; color: white; border: none; border-radius: 6px; }
+            QPushButton:hover { background-color: #48484A; }
+            QPushButton:disabled { background-color: #ccc; }
+        """)
+        self.next_btn.clicked.connect(self._show_next)
+        nav_layout.addWidget(self.next_btn)
+        layout.addLayout(nav_layout)
+        
+        # 底部按钮
+        btn_layout = QHBoxLayout()
+        self.browse_btn = QPushButton("📂 浏览其他文件夹...")
+        self.browse_btn.setStyleSheet("""
+            QPushButton { padding: 10px 16px; font-size: 13px; background-color: #0a84ff; color: white; border: none; border-radius: 6px; }
+            QPushButton:hover { background-color: #0866c6; }
+        """)
+        self.browse_btn.clicked.connect(self._browse_other_folder)
+        btn_layout.addWidget(self.browse_btn)
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet("""
+            QPushButton { padding: 10px 20px; font-size: 13px; background-color: #666; color: white; border: none; border-radius: 6px; }
+            QPushButton:hover { background-color: #555; }
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        ok_btn = QPushButton("确认选择")
+        ok_btn.setStyleSheet("""
+            QPushButton { padding: 10px 20px; font-size: 13px; background-color: #34C759; color: white; border: none; border-radius: 6px; }
+            QPushButton:hover { background-color: #248A3D; }
+        """)
+        ok_btn.clicked.connect(self._confirm)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+    
+    def _scan_photos(self):
+        """扫描照片文件夹"""
+        self.photo_files = []
+        scan_dir = self.photo_base_dir
+        # 如果指定目录不存在或没有照片，尝试找附近的照片目录
+        if not scan_dir or not os.path.exists(scan_dir):
+            parent = os.path.dirname(scan_dir) if scan_dir else os.path.expanduser('~')
+            if os.path.exists(parent):
+                best_dir = None
+                best_count = 0
+                for item in os.listdir(parent):
+                    item_path = os.path.join(parent, item)
+                    if os.path.isdir(item_path):
+                        count = 0
+                        for root, _, files in os.walk(item_path):
+                            for f in files:
+                                if f.lower().endswith(('.jpg', '.jpeg')):
+                                    count += 1
+                                if count > best_count:
+                                    break
+                            if count > best_count:
+                                break
+                        if count > best_count:
+                            best_count = count
+                            best_dir = item_path
+                if best_dir and best_count > 0:
+                    scan_dir = best_dir
+        if scan_dir and os.path.exists(scan_dir):
+            for root, _, files in os.walk(scan_dir):
+                for f in sorted(files):
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        self.photo_files.append(os.path.join(root, f))
+        print(f"[调试] PhotoPickerDialog 扫描目录: {scan_dir}, 找到 {len(self.photo_files)} 张照片")
+        self.current_index = 0
+        self._update_preview()
+
+    def _update_preview(self):
+        """更新预览"""
+        if not self.photo_files:
+            self.preview_label.setText("未找到照片\n请使用「浏览其他文件夹」手动选择")
+            self.filename_label.setText("未找到照片")
+            self.index_label.setText("0 / 0")
+            self.prev_btn.setEnabled(False)
+            self.next_btn.setEnabled(False)
+            return
+
+        self.prev_btn.setEnabled(self.current_index > 0)
+        self.next_btn.setEnabled(self.current_index < len(self.photo_files) - 1)
+        self.index_label.setText(f"{self.current_index + 1} / {len(self.photo_files)}")
+
+        path = self.photo_files[self.current_index]
+        self.filename_label.setText(os.path.basename(path))
+
+        pixmap = QPixmap(path)
+        if not pixmap.isNull():
+            pw = max(self.preview_label.width() - 20, 300)
+            ph = max(self.preview_label.height() - 20, 200)
+            scaled = pixmap.scaled(
+                pw, ph,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled)
+            self.preview_label.setText("")
+        else:
+            self.preview_label.setText("无法加载图片")
+            print(f"[警告] QPixmap 无法加载: {path}")
+    
+    def _show_prev(self):
+        if self.current_index > 0:
+            self.current_index -= 1
+            self._update_preview()
+    
+    def _show_next(self):
+        if self.current_index < len(self.photo_files) - 1:
+            self.current_index += 1
+            self._update_preview()
+    
+    def _browse_other_folder(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "选择照片文件夹", self.photo_base_dir)
+        if dir_path:
+            self.photo_base_dir = dir_path
+            self._scan_photos()
+    
+    def _confirm(self):
+        if self.photo_files:
+            self.selected_path = self.photo_files[self.current_index]
+            self.accept()
+        else:
+            QMessageBox.warning(self, "提示", "未选择任何照片")
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_preview()
+
 
 def main():
     import datetime

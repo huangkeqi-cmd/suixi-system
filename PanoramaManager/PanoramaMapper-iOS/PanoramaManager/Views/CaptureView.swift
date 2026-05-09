@@ -285,6 +285,8 @@ struct CaptureView: View {
         
         var updatedProject = projectItem.project
         updatedProject.markers.append(newMarker)
+        // 同步更新 floors 以保持与 PC 端兼容
+        updatedProject = syncFloorsWithMarkers(updatedProject)
         
         do {
             try ProjectManager.shared.updateProject(ProjectItem(
@@ -308,6 +310,8 @@ struct CaptureView: View {
     private func deleteMarker(_ marker: Marker) {
         var updatedProject = projectItem.project
         updatedProject.markers.removeAll { $0.id == marker.id }
+        // 同步更新 floors 以保持与 PC 端兼容
+        updatedProject = syncFloorsWithMarkers(updatedProject)
         
         do {
             try ProjectManager.shared.updateProject(ProjectItem(
@@ -332,6 +336,8 @@ struct CaptureView: View {
         if let index = updatedProject.markers.firstIndex(where: { $0.id == marker.id }) {
             updatedProject.markers[index] = updatedMarker
         }
+        // 同步更新 floors 以保持与 PC 端兼容
+        updatedProject = syncFloorsWithMarkers(updatedProject)
         
         do {
             try ProjectManager.shared.updateProject(ProjectItem(
@@ -353,6 +359,8 @@ struct CaptureView: View {
         if let index = updatedProject.markers.firstIndex(where: { $0.id == marker.id }) {
             updatedProject.markers[index] = marker
         }
+        // 同步更新 floors 以保持与 PC 端兼容
+        updatedProject = syncFloorsWithMarkers(updatedProject)
         
         do {
             try ProjectManager.shared.updateProject(ProjectItem(
@@ -364,6 +372,19 @@ struct CaptureView: View {
         } catch {
             print("更新失败: \(error)")
         }
+    }
+    
+    /// 将 markers 同步到 floors，确保 PC 端兼容性
+    private func syncFloorsWithMarkers(_ project: Project) -> Project {
+        var updated = project
+        if updated.floors.isEmpty {
+            updated.floors = [Floor(id: "default_floor", name: "默认楼层", order: 0,
+                                    hasPlan: !updated.floorplan.isEmpty, markers: updated.markers)]
+        } else {
+            updated.floors[0].markers = updated.markers
+            updated.floors[0].hasPlan = !updated.floorplan.isEmpty
+        }
+        return updated
     }
     
     // 导出项目

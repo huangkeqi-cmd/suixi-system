@@ -1,19 +1,15 @@
-/**
- * 随心系统 / Suixin System
- * Copyright (c) 2026 huangkeqi
- * 保留所有权利。
- * 
- * 本软件目前为个人工作流工具，开源供学习参考。
- * 项目主页：https://github.com/huangkeqi-cmd/suixi-system
- */
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 随系 · 影像管理器 - 简易版
 系统追求：让工具追上现场的速度
-双击运行，自动识别同级目录的项目数据包和照片文件夹
-自动生成项目文件夹、关联照片、启动查看器
+
+使用方式：
+1. 将本程序（或打包后的exe）放到数据包和照片文件夹的同级目录
+2. 双击运行，全自动处理：
+   - 先检查同级目录是否已有 viewer/index.html，有则直接打开
+   - 没有则自动识别 ZIP 数据包和照片文件夹，解压、关联、生成查看器
+   - 自动启动本地服务器并用浏览器打开
 """
 
 import sys
@@ -41,7 +37,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction
 
 # 导入核心类
-from main import PanoramaManager, Project, Marker, HttpServerThread, extract_exif_datetime
+from main import Project, Marker, HttpServerThread, extract_exif_datetime
 
 
 class WorkerThread(QThread):
@@ -55,7 +51,22 @@ class WorkerThread(QThread):
     
     def run(self):
         try:
-            # 1. 扫描
+            # 1. 优先检查是否已有 viewer
+            viewer_dir = os.path.join(self.base_dir, 'viewer')
+            index_path = os.path.join(viewer_dir, 'index.html')
+            if os.path.exists(index_path):
+                # 尝试找到对应的项目目录（用于后续关联）
+                project_json_path = os.path.join(viewer_dir, 'project.json')
+                project = None
+                if os.path.exists(project_json_path):
+                    with open(project_json_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    project = Project.from_dict(data)
+                self.progress.emit("发现已有查看器，准备启动...", 90)
+                self.finished.emit(True, "", viewer_dir, project)
+                return
+            
+            # 2. 扫描
             self.progress.emit("正在扫描文件夹...", 10)
             zip_files = []
             photo_dirs = []
@@ -64,7 +75,7 @@ class WorkerThread(QThread):
                 item_path = os.path.join(self.base_dir, item)
                 if os.path.isfile(item_path) and item.lower().endswith('.zip'):
                     zip_files.append(item_path)
-                elif os.path.isdir(item_path) and item.lower() not in ['viewer', '__pycache__', 'build', 'dist']:
+                elif os.path.isdir(item_path) and item.lower() not in ['viewer', '__pycache__', 'build', 'dist', 'src']:
                     jpg_count = 0
                     for root, _, files in os.walk(item_path):
                         for f in files:
@@ -87,7 +98,7 @@ class WorkerThread(QThread):
                 photo_dirs.sort(key=lambda x: x[1], reverse=True)
                 photo_dir = photo_dirs[0][0]
             
-            # 2. 解压 ZIP（只处理第一个）
+            # 3. 解压 ZIP（只处理第一个）
             self.progress.emit("正在解压项目...", 30)
             zip_path = zip_files[0]
             zip_name = os.path.splitext(os.path.basename(zip_path))[0]
@@ -98,7 +109,7 @@ class WorkerThread(QThread):
                 with zipfile.ZipFile(zip_path, 'r') as zf:
                     zf.extractall(extract_dir)
             
-            # 3. 加载项目
+            # 4. 加载项目
             self.progress.emit("正在加载项目...", 50)
             project_json_path = None
             for root, _, files in os.walk(extract_dir):
@@ -116,7 +127,7 @@ class WorkerThread(QThread):
             project = Project.from_dict(data)
             project.photoBaseDir = photo_dir or ''
             
-            # 4. 关联照片（不复制）
+            # 5. 关联照片（不复制）
             if photo_dir:
                 self.progress.emit("正在关联照片...", 70)
                 self._link_photos(project, photo_dir)
@@ -199,6 +210,7 @@ class SimpleWindow(QMainWindow):
         self.setGeometry(400, 300, 480, 280)
         
         # 创建临时 PanoramaManager 用于生成 HTML（隐藏）
+        from main import PanoramaManager
         self.temp_manager = PanoramaManager()
         self.temp_manager.hide()
         
@@ -296,10 +308,10 @@ class SimpleWindow(QMainWindow):
         
         # 在主线程生成 viewer（Qt 控件操作必须在主线程）
         try:
-            viewer_dir = os.path.join(project_dir, 'viewer')
+            viewer_dir = os.path.join(project_dir, 'viewer') if project_dir else os.path.join(base_dir, 'viewer')
             os.makedirs(viewer_dir, exist_ok=True)
             
-            photo_base_dir = getattr(project, 'photoBaseDir', '')
+            photo_base_dir = getattr(project, 'photoBaseDir', '') if project else ''
             
             # 创建外部照片链接
             if photo_base_dir and os.path.exists(photo_base_dir):
@@ -319,29 +331,30 @@ class SimpleWindow(QMainWindow):
                     shutil.copytree(photo_base_dir, link_path, dirs_exist_ok=True)
             
             # 复制 project.json（调整 panoramaPath）
-            project_copy = project.to_dict()
-            if photo_base_dir and os.path.exists(photo_base_dir):
-                for floor_data in project_copy.get('floors', []):
-                    for marker_data in floor_data.get('markers', []):
-                        if marker_data.get('panoramaPath') and not os.path.isabs(marker_data['panoramaPath']):
-                            marker_data['panoramaPath'] = 'external_photos/' + marker_data['panoramaPath']
-            
-            with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
-                json.dump(project_copy, f, ensure_ascii=False, indent=2)
-            
-            # 复制平面图
-            for floor_data in project.floors:
-                floor_id = floor_data['id']
-                src = os.path.join(project_dir, f'floorplan_{floor_id}.jpg')
-                if not os.path.exists(src) and project.floorplan:
-                    src = os.path.join(project_dir, project.floorplan)
-                if os.path.exists(src):
-                    shutil.copy2(src, os.path.join(viewer_dir, f'floorplan_{floor_id}.jpg'))
-            
-            # 生成 HTML
-            self.temp_manager.project_dir = project_dir
-            self.temp_manager.project_data = project
-            self.temp_manager._generate_viewer_html(viewer_dir)
+            if project:
+                project_copy = project.to_dict()
+                if photo_base_dir and os.path.exists(photo_base_dir):
+                    for floor_data in project_copy.get('floors', []):
+                        for marker_data in floor_data.get('markers', []):
+                            if marker_data.get('panoramaPath') and not os.path.isabs(marker_data['panoramaPath']):
+                                marker_data['panoramaPath'] = 'external_photos/' + marker_data['panoramaPath']
+                
+                with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
+                    json.dump(project_copy, f, ensure_ascii=False, indent=2)
+                
+                # 复制平面图
+                for floor_data in project.floors:
+                    floor_id = floor_data['id']
+                    src = os.path.join(project_dir, f'floorplan_{floor_id}.jpg')
+                    if not os.path.exists(src) and project.floorplan:
+                        src = os.path.join(project_dir, project.floorplan)
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(viewer_dir, f'floorplan_{floor_id}.jpg'))
+                
+                # 生成 HTML
+                self.temp_manager.project_dir = project_dir
+                self.temp_manager.project_data = project
+                self.temp_manager._generate_viewer_html(viewer_dir)
             
         except Exception as e:
             import traceback

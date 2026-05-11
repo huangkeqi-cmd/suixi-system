@@ -43,14 +43,15 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QMessageBox,
     QListWidget, QListWidgetItem, QSplitter, QGraphicsView,
     QGraphicsScene, QGraphicsPixmapItem, QGraphicsEllipseItem,
-    QGraphicsTextItem, QDialog, QTextEdit, QProgressDialog,
+    QGraphicsTextItem, QGraphicsPathItem, QGraphicsLineItem,
+    QDialog, QTextEdit, QProgressDialog,
     QMenuBar, QMenu, QToolBar, QStatusBar, QFrame, QScrollArea,
     QGridLayout, QGroupBox, QComboBox, QSpinBox, QCheckBox,
     QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSlider
+    QSlider, QInputDialog
 )
 from PyQt6.QtCore import Qt, QRectF, QPointF, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QBrush, QColor, QFont, QIcon, QAction
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QBrush, QColor, QFont, QIcon, QAction, QPainterPath
 
 from PIL import Image, ImageDraw, ImageFont
 from PIL.ExifTags import TAGS
@@ -77,6 +78,7 @@ class Marker:
     panoramaPath: str = ""
     originalPhotoPath: str = ""  # 原始照片绝对路径（不复制照片时使用）
     photos: List[str] = field(default_factory=list)  # 关联的多张照片路径列表
+    direction: float = -90.0  # 扇形视线方向，-90度为上（12点钟方向）
     
     def to_dict(self) -> dict:
         return asdict(self)
@@ -212,12 +214,13 @@ class HttpServerThread(QThread):
     server_stopped = pyqtSignal()
     error_occurred = pyqtSignal(str)
     
-    def __init__(self, viewer_dir: str, port: int = 0, use_https: bool = False, photo_base_dir: str = ""):
+    def __init__(self, viewer_dir: str, port: int = 0, use_https: bool = False, photo_base_dir: str = "", parent_app=None):
         super().__init__()
         self.viewer_dir = viewer_dir
         self.port = port
         self.use_https = use_https
         self.photo_base_dir = photo_base_dir
+        self.parent_app = parent_app
         self.server = None
         self.redirect_server = None
         self.is_running = False
@@ -229,6 +232,9 @@ class HttpServerThread(QThread):
             photo_base_dir = self.photo_base_dir
             
             class CustomHandler(SimpleHTTPRequestHandler):
+                # 类属性，由外部设置
+                external_parent_app = None
+                
                 def translate_path(self, path):
                     # 保存原始路径用于调试
                     original_path = path
@@ -283,6 +289,36 @@ class HttpServerThread(QThread):
                 
                 def do_GET(self):
                     print(f"[HTTP] GET {self.path}")
+                    # API: 接收全景图 yaw 角度更新
+                    if self.path.startswith('/api/set_direction'):
+                        try:
+                            from urllib.parse import urlparse, parse_qs
+                            parsed = urlparse(self.path)
+                            params = parse_qs(parsed.query)
+                            marker_id = params.get('marker_id', [None])[0]
+                            direction_str = params.get('direction', [None])[0]  # 新版：直接发送方向
+                            yaw_str = params.get('yaw', [None])[0]              # 兼容旧版
+                            direction = None
+                            if marker_id:
+                                if direction_str is not None:
+                                    direction = float(direction_str)
+                                elif yaw_str is not None:
+                                    direction = float(yaw_str) - 90
+                                if direction is not None:
+                                    direction = ((direction + 180) % 360) - 180
+                                    if CustomHandler.external_parent_app:
+                                        CustomHandler.external_parent_app.direction_update.emit(marker_id, direction)
+                                    self.send_response(200)
+                                    self.send_header('Content-Type', 'application/json')
+                                    self.send_header('Access-Control-Allow-Origin', '*')
+                                    self.end_headers()
+                                    self.wfile.write(json.dumps({'status': 'ok', 'direction': direction}).encode())
+                                    return
+                        except Exception as e:
+                            print(f"[API] 处理方向更新失败: {e}")
+                        self.send_response(400)
+                        self.end_headers()
+                        return
                     return super().do_GET()
                 
                 def end_headers(self):
@@ -342,6 +378,7 @@ class HttpServerThread(QThread):
             
             if self.use_https:
                 # HTTPS服务器
+                CustomHandler.external_parent_app = self.parent_app
                 self.server = ThreadedHTTPServer(("", self.port), CustomHandler)
                 
                 # 尝试加载SSL证书
@@ -363,6 +400,7 @@ class HttpServerThread(QThread):
                     self.use_https = False
                     
             if not self.use_https or not self.server:
+                CustomHandler.external_parent_app = self.parent_app
                 self.server = ThreadedHTTPServer(("", self.port), CustomHandler)
             
             actual_port = self.server.socket.getsockname()[1]
@@ -1285,12 +1323,15 @@ class FloorplanCanvas(QGraphicsView):
 
         self.pixmap_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.pixmap_item)
-        self.scene.setSceneRect(self.pixmap_item.boundingRect())
+        # 扩大场景矩形，允许拖动查看平面图边缘
+        rect = self.pixmap_item.boundingRect()
+        expanded_rect = rect.adjusted(-500, -500, 500, 500)
+        self.scene.setSceneRect(expanded_rect)
 
         self.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
         return True
 
-    def add_marker(self, marker_id: str, x: float, y: float, status: str, label: str = ""):
+    def add_marker(self, marker_id: str, x: float, y: float, status: str, label: str = "", direction: float = None):
         """添加标记点"""
         if not self.pixmap_item:
             return
@@ -1318,6 +1359,7 @@ class FloorplanCanvas(QGraphicsView):
         ellipse.setPen(QPen(QColor(255, 255, 255), 2))
         ellipse.setData(0, marker_id)
         ellipse.setData(1, status)
+        ellipse.setData(2, direction)  # direction，后续从marker数据设置
         ellipse.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsSelectable)
         ellipse.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, False)
         ellipse.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -1356,9 +1398,91 @@ class FloorplanCanvas(QGraphicsView):
                 self.scene.removeItem(item)
         self.text_items = []
 
+    def render_direction_sectors(self):
+        """渲染所有标记点的扇形视线范围"""
+        import math
+        
+        for item in list(self.scene.items()):
+            if isinstance(item, QGraphicsPathItem) and item.data(0) and str(item.data(0)).endswith('_sector'):
+                self.scene.removeItem(item)
+        
+        if not self.pixmap_item:
+            return
+        
+        sector_angle = 90
+        radius = 40
+        
+        for marker_id, ellipse in self.marker_items.items():
+            direction = ellipse.data(2)
+            if direction is None:
+                direction = -90.0
+            try:
+                direction = float(direction)
+            except (TypeError, ValueError):
+                continue
+            
+            rect = ellipse.rect()
+            cx = rect.x() + rect.width() / 2
+            cy = rect.y() + rect.height() / 2
+            
+            ang = direction
+            half = sector_angle / 2
+            start_ang = -(ang + half)
+            
+            path = QPainterPath()
+            path.moveTo(cx, cy)
+            
+            left_rad = math.radians(start_ang)
+            lx = cx + radius * math.cos(left_rad)
+            ly = cy - radius * math.sin(left_rad)
+            path.lineTo(lx, ly)
+            
+            arc_rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
+            path.arcTo(arc_rect, start_ang, sector_angle)
+            
+            path.lineTo(cx, cy)
+            
+            sector = QGraphicsPathItem(path)
+            sector.setBrush(QColor(0, 122, 255, 80))
+            sector.setPen(QPen(QColor(255, 255, 255), 1))
+            sector.setData(0, f"{marker_id}_sector")
+            sector.setZValue(1)
+            self.scene.addItem(sector)
+
+    def rotate_sector(self, marker_id: str, angle_delta: float):
+        """旋转扇形方向
+        
+        Args:
+            marker_id: 标记点ID
+            angle_delta: 旋转角度增量（度）
+        """
+        item = self.marker_items.get(marker_id)
+        if not item:
+            return
+        
+        current_direction = item.data(2)
+        if current_direction is None:
+            current_direction = -90.0
+        
+        new_direction = (current_direction + angle_delta) % 360
+        if new_direction > 180:
+            new_direction -= 360
+        
+        # 更新存储的方向
+        item.setData(2, new_direction)
+        
+        # 重新渲染扇形
+        self.render_direction_sectors()
+        
+        return new_direction
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.pos())
+            # 调整模式：记录初始位置
+            if getattr(self, '_adjust_mode', False):
+                self._last_adjust_pos = event.pos()
+                return
             item = self.itemAt(event.pos())
             if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
                 self._dragging_marker = item
@@ -1379,7 +1503,6 @@ class FloorplanCanvas(QGraphicsView):
     def mouseMoveEvent(self, event):
         if self._dragging_marker and self.pixmap_item:
             scene_pos = self.mapToScene(event.pos())
-            # 计算相对于图片的新位置
             rect = self.pixmap_item.boundingRect()
             new_x = max(0.0, min(1.0, scene_pos.x() / rect.width()))
             new_y = max(0.0, min(1.0, scene_pos.y() / rect.height()))
@@ -1387,6 +1510,51 @@ class FloorplanCanvas(QGraphicsView):
             pixel_y = new_y * rect.height()
             radius = 8
             self._dragging_marker.setRect(pixel_x - radius, pixel_y - radius, radius * 2, radius * 2)
+            return
+        elif getattr(self, '_adjust_mode', False) and self.pixmap_item:
+            # 调整模式：鼠标绕采集点中心旋转扇形
+            marker_id = getattr(self, '_adjust_marker_id', None)
+            if marker_id:
+                item = self.marker_items.get(marker_id)
+                if item:
+                    # 获取采集点中心在场景中的位置
+                    item_rect = item.rect()
+                    center_x = item_rect.x() + item_rect.width() / 2
+                    center_y = item_rect.y() + item_rect.height() / 2
+                    
+                    # 获取鼠标在场景中的位置
+                    scene_pos = self.mapToScene(event.pos())
+                    mouse_x = scene_pos.x()
+                    mouse_y = scene_pos.y()
+                    
+                    # 计算鼠标相对于采集点中心的角度
+                    dx = mouse_x - center_x
+                    dy = mouse_y - center_y
+                    
+                    # 计算角度（QPainterPath坐标系：0°=右，顺时针为正）
+                    import math
+                    angle_rad = math.atan2(dy, dx)
+                    angle_deg = math.degrees(angle_rad)
+                    
+                    # 转换为扇形方向角度
+                    # direction: -90°=上(12点), 0°=右, 90°=下, ±180°=左
+                    # math.atan2: 0°=右, 90°=下, -90°=上, ±180°=左
+                    # 所以 direction = angle_deg（方向一致）
+                    new_dir = angle_deg
+                    
+                    # 标准化到 [-180, 180]
+                    if new_dir > 180:
+                        new_dir -= 360
+                    
+                    item.setData(2, new_dir)
+                    self.render_direction_sectors()
+                    
+                    # 通过父窗口更新方向显示
+                    parent = self.parent()
+                    while parent and not hasattr(parent, 'direction_label'):
+                        parent = parent.parent()
+                    if parent and hasattr(parent, 'direction_label'):
+                        parent.direction_label.setText(f"{new_dir:.0f}°")
             return
         elif self._panning:
             delta = event.pos() - self._last_pan_pos
@@ -1420,6 +1588,11 @@ class FloorplanCanvas(QGraphicsView):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # 如果在调整模式，双击确认角度并退出
+            if getattr(self, '_adjust_mode', False):
+                self.marker_double_clicked.emit('__ADJUST_MODE_CONFIRM__')
+                return
+            
             item = self.itemAt(event.pos())
             if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
                 self.marker_double_clicked.emit(str(item.data(0)))
@@ -1427,17 +1600,27 @@ class FloorplanCanvas(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
-        scene_pos = self.mapToScene(event.pos())
-        item = self.itemAt(event.pos())
-        if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
-            self.marker_context_menu.emit(str(item.data(0)), event.globalPos())
-        elif self.pixmap_item and self.pixmap_item.contains(scene_pos):
-            rect = self.pixmap_item.boundingRect()
-            norm_x = max(0.0, min(1.0, scene_pos.x() / rect.width()))
-            norm_y = max(0.0, min(1.0, scene_pos.y() / rect.height()))
-            self.marker_add_requested.emit(norm_x, norm_y)
-        else:
-            self.canvas_context_menu.emit(event.globalPos())
+        try:
+            scene_pos = self.mapToScene(event.pos())
+            item = self.itemAt(event.pos())
+            if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
+                marker_id = str(item.data(0))
+                if marker_id:
+                    self.marker_context_menu.emit(marker_id, QPointF(event.globalPos()))
+                    return
+            # 点击空白处添加新采集点
+            if self.pixmap_item and self.pixmap_item.contains(scene_pos):
+                rect = self.pixmap_item.boundingRect()
+                norm_x = max(0.0, min(1.0, scene_pos.x() / rect.width()))
+                norm_y = max(0.0, min(1.0, scene_pos.y() / rect.height()))
+                self.marker_add_requested.emit(norm_x, norm_y)
+            else:
+                self.canvas_context_menu.emit(event.globalPos())
+        except Exception as e:
+            print(f"[错误] contextMenuEvent 异常: {e}")
+            import traceback
+            traceback.print_exc()
+
 
     def wheelEvent(self, event):
         """鼠标滚轮缩放"""
@@ -1452,6 +1635,14 @@ class FloorplanCanvas(QGraphicsView):
 # =============================================================================
 
 class PanoramaManager(QMainWindow):
+    # 方向更新信号（从HTTP服务器线程传递到主线程）
+    direction_update = pyqtSignal(str, float)
+    
+    def _cache_bust_url(self, base_url: str) -> str:
+        """给URL加上时间戳参数，避免浏览器缓存"""
+        import time
+        return f"{base_url}?v={int(time.time())}"
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("随系 · 影像管理器")
@@ -1561,8 +1752,8 @@ class PanoramaManager(QMainWindow):
         self.import_photos_btn.setEnabled(False)
         self.import_photos_btn.setStyleSheet("""
             QPushButton {
-                padding: 12px;
-                font-size: 14px;
+                padding: 6px 12px;
+                font-size: 13px;
                 background-color: #007AFF;
                 color: white;
                 border: none;
@@ -1580,7 +1771,7 @@ class PanoramaManager(QMainWindow):
         self.one_key_anchor_btn.setToolTip("手动指定锚点照片，用于校准时间偏移\n适用于外设拍摄照片的自动关联")
         self.one_key_anchor_btn.setStyleSheet("""
             QPushButton {
-                padding: 10px;
+                padding: 8px 16px;
                 font-size: 13px;
                 background-color: #FF9500;
                 color: white;
@@ -1597,8 +1788,8 @@ class PanoramaManager(QMainWindow):
         self.generate_viewer_btn.setEnabled(False)
         self.generate_viewer_btn.setStyleSheet("""
             QPushButton {
-                padding: 12px;
-                font-size: 14px;
+                padding: 6px 12px;
+                font-size: 13px;
                 background-color: #34C759;
                 color: white;
                 border: none;
@@ -1614,8 +1805,8 @@ class PanoramaManager(QMainWindow):
         self.open_web_btn.setEnabled(False)
         self.open_web_btn.setStyleSheet("""
             QPushButton {
-                padding: 12px;
-                font-size: 14px;
+                padding: 6px 12px;
+                font-size: 13px;
                 background-color: #FF9500;
                 color: white;
                 border: none;
@@ -1631,8 +1822,8 @@ class PanoramaManager(QMainWindow):
         self.stop_server_btn.setEnabled(False)
         self.stop_server_btn.setStyleSheet("""
             QPushButton {
-                padding: 12px;
-                font-size: 14px;
+                padding: 6px 12px;
+                font-size: 13px;
                 background-color: #FF3B30;
                 color: white;
                 border: none;
@@ -1648,8 +1839,8 @@ class PanoramaManager(QMainWindow):
         self.save_changes_btn.setEnabled(False)
         self.save_changes_btn.setStyleSheet("""
             QPushButton {
-                padding: 12px;
-                font-size: 14px;
+                padding: 6px 12px;
+                font-size: 13px;
                 background-color: #5856D6;
                 color: white;
                 border: none;
@@ -1666,8 +1857,8 @@ class PanoramaManager(QMainWindow):
         self.export_project_btn.setEnabled(False)
         self.export_project_btn.setStyleSheet("""
             QPushButton {
-                padding: 12px;
-                font-size: 14px;
+                padding: 6px 12px;
+                font-size: 13px;
                 background-color: #AF52DE;
                 color: white;
                 border: none;
@@ -1678,7 +1869,25 @@ class PanoramaManager(QMainWindow):
         """)
         self.export_project_btn.clicked.connect(self._export_for_capture)
         actions_layout.addWidget(self.export_project_btn)
-        
+
+        # 服务器信息展开按钮（默认隐藏服务器信息）
+        self.toggle_server_info_btn = QPushButton("📡 显示服务器信息")
+        self.toggle_server_info_btn.setEnabled(False)  # 服务器启动后才可用
+        self.toggle_server_info_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px;
+                font-size: 13px;
+                background-color: #5AC8FA;
+                color: white;
+                border: none;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #4CA0D0; }
+            QPushButton:disabled { background-color: #CCC; }
+        """)
+        self.toggle_server_info_btn.clicked.connect(self._toggle_server_info)
+        actions_layout.addWidget(self.toggle_server_info_btn)
+
         # 导入状态显示
         actions_layout.addSpacing(10)
         self.import_status_label = QLabel("就绪")
@@ -1877,6 +2086,86 @@ class PanoramaManager(QMainWindow):
         self.marker_coord_label = QLabel("-")
         marker_info_layout.addWidget(self.marker_coord_label, 5, 1)
         
+        # 照片预览框
+        marker_info_layout.addWidget(QLabel("照片预览:"), 6, 0)
+        self.photo_preview = QLabel("无照片")
+        self.photo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.photo_preview.setMinimumSize(200, 150)
+        self.photo_preview.setMaximumSize(200, 150)
+        self.photo_preview.setStyleSheet("""
+            QLabel {
+                background-color: #1C1C1E;
+                border: 2px solid #ddd;
+                border-radius: 8px;
+                color: #999;
+                font-size: 12px;
+            }
+        """)
+        marker_info_layout.addWidget(self.photo_preview, 6, 1)
+        
+        # 照片预览提示文字
+        self.photo_preview_hint = QLabel("💡 对比扇形方向与全景内容是否对齐")
+        self.photo_preview_hint.setStyleSheet("color: #999; font-size: 11px; padding: 2px;")
+        marker_info_layout.addWidget(self.photo_preview_hint, 7, 1)
+        
+        # 视线方向控制
+        marker_info_layout.addWidget(QLabel("视线方向:"), 8, 0)
+        self.direction_label = QLabel("-90°")
+        self.direction_label.setStyleSheet("font-weight: bold; color: #0A84FF; font-size: 14px;")
+        marker_info_layout.addWidget(self.direction_label, 8, 1)
+        
+        # 旋转按钮组
+        rotate_layout = QHBoxLayout()
+        
+        self.rotate_left_btn = QPushButton("↺ 左转")
+        self.rotate_left_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 10px;
+                font-size: 12px;
+                background-color: #3A3A3C;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #48484A; }
+        """)
+        self.rotate_left_btn.clicked.connect(lambda: self._rotate_sector(-15))
+        rotate_layout.addWidget(self.rotate_left_btn)
+        
+        self.rotate_right_btn = QPushButton("右转 ↻")
+        self.rotate_right_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 10px;
+                font-size: 12px;
+                background-color: #3A3A3C;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #48484A; }
+        """)
+        self.rotate_right_btn.clicked.connect(lambda: self._rotate_sector(15))
+        rotate_layout.addWidget(self.rotate_right_btn)
+        
+        marker_info_layout.addLayout(rotate_layout, 9, 1)
+        
+        # 对齐全景按钮
+        self.align_panorama_btn = QPushButton("🎯 对齐全景")
+        self.align_panorama_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 10px;
+                font-size: 13px;
+                background-color: #FF9500;
+                color: white;
+                border: none;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #B36800; }
+            QPushButton:disabled { background-color: #ccc; }
+        """)
+        self.align_panorama_btn.clicked.connect(self._align_to_panorama)
+        marker_info_layout.addWidget(self.align_panorama_btn, 10, 0, 1, 2)
+        
         self.delete_marker_btn = QPushButton("🗑️ 删除当前点位")
         self.delete_marker_btn.setStyleSheet("""
             QPushButton {
@@ -1891,13 +2180,26 @@ class PanoramaManager(QMainWindow):
             QPushButton:hover { background-color: #B32418; }
         """)
         self.delete_marker_btn.clicked.connect(self._delete_current_marker)
-        marker_info_layout.addWidget(self.delete_marker_btn, 6, 0, 1, 2)
+        marker_info_layout.addWidget(self.delete_marker_btn, 11, 0, 1, 2)
         
         self.marker_info_group.setEnabled(False)
+        self.marker_info_group.setCheckable(True)
+        self.marker_info_group.setChecked(False)
+        self.marker_info_group.toggled.connect(self._on_marker_info_group_toggled)
         right_layout.addWidget(self.marker_info_group)
-        
+        # 初始隐藏组内控件
+        self._on_marker_info_group_toggled(False)
+
         # 已关联照片列表
         self.linked_photos_group = QGroupBox("已关联照片")
+        self.linked_photos_group.setCheckable(True)
+        self.linked_photos_group.setChecked(False)
+        self.linked_photos_group.toggled.connect(self._on_linked_photos_group_toggled)
+        # 后续继续原有布局...
+        linked_photos_layout = QVBoxLayout(self.linked_photos_group)
+        ...
+        right_layout.addWidget(self.linked_photos_group)
+        self._on_linked_photos_group_toggled(False)
         linked_photos_layout = QVBoxLayout(self.linked_photos_group)
         
         self.linked_photos_list = QListWidget()
@@ -1967,10 +2269,13 @@ class PanoramaManager(QMainWindow):
         # 加载历史记录
         self._refresh_history_list()
         
+        # 连接方向更新信号（从HTTP服务器线程传递到主线程）
+        self.direction_update.connect(self._on_direction_update_from_web)
+        
         right_layout.addStretch()
         
         splitter.addWidget(right_panel)
-        right_panel.setMinimumWidth(360)
+        right_panel.setMinimumWidth(420)
         splitter.setSizes([900, 500])
     
     def _get_history_file(self) -> str:
@@ -2381,6 +2686,16 @@ class PanoramaManager(QMainWindow):
             # 如果没有楼层有平面图，尝试加载第一个楼层
             if not current_floor and self.project_data.floors:
                 current_floor = self.project_data.floors[0]
+            
+            # 为所有楼层中完全没有 direction 字段或 direction 为 null 的点位设置默认值
+            # 已有 direction 值的保持不变，以项目数据为准
+            for floor_data in self.project_data.floors:
+                for marker_data in floor_data.get('markers', []):
+                    if 'direction' not in marker_data or marker_data.get('direction') is None:
+                        marker_data['direction'] = -90.0
+                        print(f"[调试] 点位 {marker_data.get('customName') or marker_data.get('id')} 无 direction，设为默认 -90°")
+                    else:
+                        print(f"[调试] 点位 {marker_data.get('customName') or marker_data.get('id')} 已有 direction={marker_data.get('direction')}°，保持不变")
             
             if current_floor:
                 self._load_floor(current_floor['id'])
@@ -2882,8 +3197,14 @@ class PanoramaManager(QMainWindow):
             if photo_base_dir and os.path.exists(photo_base_dir):
                 # 移除旧的链接
                 if os.path.exists(external_photos_link):
-                    if os.path.islink(external_photos_link) or os.path.isdir(external_photos_link):
-                        os.remove(external_photos_link) if os.path.islink(external_photos_link) else shutil.rmtree(external_photos_link)
+                    if os.path.islink(external_photos_link):
+                        os.remove(external_photos_link)
+                    elif os.path.isdir(external_photos_link):
+                        if sys.platform == 'win32':
+                            import subprocess
+                            subprocess.run(['cmd', '/c', 'rmdir', '/q', external_photos_link], capture_output=True)
+                        else:
+                            shutil.rmtree(external_photos_link)
                 # 创建 junction (Windows) 或符号链接
                 link_created = False
                 try:
@@ -2983,7 +3304,7 @@ class PanoramaManager(QMainWindow):
         for port in [8888, 9000, 9999, 0]:
             try:
                 print(f"[调试] 尝试启动端口: {port}")
-                self.server_thread = HttpServerThread(viewer_dir, port, photo_base_dir=photo_base_dir)
+                self.server_thread = HttpServerThread(viewer_dir, port, photo_base_dir=photo_base_dir, parent_app=self)
                 self.server_thread.server_started.connect(self._on_auto_server_started)
                 self.server_thread.error_occurred.connect(self._on_server_error)
                 self.server_thread.start()
@@ -3028,7 +3349,10 @@ class PanoramaManager(QMainWindow):
         except Exception as e:
             print(f"生成二维码失败: {e}")
         
-        self.server_info_group.setVisible(True)
+        # 默认不自动显示服务器信息，由用户手动展开
+        self.server_info_group.setVisible(False)
+        self.toggle_server_info_btn.setEnabled(True)
+        self.toggle_server_info_btn.setText("📡 显示服务器信息")
         self.stop_server_btn.setEnabled(True)
         self.open_web_btn.setEnabled(False)
         
@@ -3080,6 +3404,18 @@ class PanoramaManager(QMainWindow):
             self.open_photo_folder_btn.setEnabled(has_photo)
             self.pick_photo_btn.setEnabled(True)
             self.delete_marker_btn.setEnabled(True)
+            
+            # 新增：更新视线方向
+            direction = getattr(self.current_marker, 'direction', -90.0)
+            if direction is None:
+                direction = -90.0
+            self.direction_label.setText(f"{direction:.0f}°")
+            
+            # 新增：更新照片预览
+            self._update_photo_preview()
+            
+            # 新增：更新对齐全景按钮状态
+            self.align_panorama_btn.setEnabled(has_photo)
     
     def _create_floor_tabs(self):
         """创建楼层切换标签"""
@@ -3173,8 +3509,10 @@ class PanoramaManager(QMainWindow):
                 marker = Marker.from_dict(marker_data)
                 label = marker.customName or marker.id
                 self.canvas.add_marker(
-                    marker.id, marker.x, marker.y, marker.status, label
+                    marker.id, marker.x, marker.y, marker.status, label,
+                    direction=getattr(marker, 'direction', None)
                 )
+            self.canvas.render_direction_sectors()
         else:
             QMessageBox.warning(self, "提示", f"楼层 '{floor_data['name']}' 的平面图文件不存在")
     
@@ -3223,8 +3561,14 @@ class PanoramaManager(QMainWindow):
             if photo_base_dir and os.path.exists(photo_base_dir):
                 # 移除旧的链接
                 if os.path.exists(external_photos_link):
-                    if os.path.islink(external_photos_link) or os.path.isdir(external_photos_link):
-                        os.remove(external_photos_link) if os.path.islink(external_photos_link) else shutil.rmtree(external_photos_link)
+                    if os.path.islink(external_photos_link):
+                        os.remove(external_photos_link)
+                    elif os.path.isdir(external_photos_link):
+                        if sys.platform == 'win32':
+                            import subprocess
+                            subprocess.run(['cmd', '/c', 'rmdir', '/q', external_photos_link], capture_output=True)
+                        else:
+                            shutil.rmtree(external_photos_link)
                 # 创建 junction (Windows) 或符号链接
                 try:
                     if sys.platform == 'win32':
@@ -3435,7 +3779,7 @@ class PanoramaManager(QMainWindow):
         }
         
         .zoom-reset {
-            font-size: 14px;
+            font-size: 13px;
             width: auto;
             padding: 0 16px;
             border-radius: 22px;
@@ -3506,7 +3850,7 @@ class PanoramaManager(QMainWindow):
             border-radius: 24px;
             cursor: pointer;
             backdrop-filter: blur(10px);
-            font-size: 14px;
+            font-size: 13px;
         }
         .nav-btn:hover { background: rgba(0,0,0,0.9); }
         
@@ -3581,7 +3925,7 @@ class PanoramaManager(QMainWindow):
             border: none;
             border-radius: 24px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 13px;
             z-index: 1001;
         }
         
@@ -3869,6 +4213,9 @@ class PanoramaManager(QMainWindow):
                 // 添加事件监听
                 addZoomEvents(wrapper, img, floor.markers);
                 
+                // 首次渲染扇形（只显示选中的点位）
+                renderSectors(wrapper, floor.markers, offsetX, offsetY, displayedWidth, displayedHeight, 1);
+                
                 // 加载影像
                 loadPanorama(0);
             };
@@ -3909,6 +4256,84 @@ class PanoramaManager(QMainWindow):
             dot.style.top = topPos + 'px';
         }
         
+        // ===== 扇形渲染函数 =====
+        function renderSectors(wrapper, markers, offsetX, offsetY, displayedWidth, displayedHeight, scale) {
+            // 清除旧扇形
+            wrapper.querySelectorAll('.sector-svg').forEach(s => s.remove());
+            
+            const sectorAngle = 90;
+            const radius = 30;
+            
+            // 只渲染当前选中的标记点的扇形
+            markers.forEach((marker, idx) => {
+                // 只显示选中点位的扇形
+                if (idx !== currentMarkerIndex) return;
+                
+                // 确定扇形方向：优先使用全景同步方向，否则使用 marker.direction
+                let direction;
+                if (currentSectorDirection !== null) {
+                    direction = currentSectorDirection;
+                } else if (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') {
+                    direction = parseFloat(marker.direction);
+                } else {
+                    return;  // 没有有效方向，不渲染扇形
+                }
+                const cx = offsetX + (marker.x * displayedWidth);
+                const cy = offsetY + (marker.y * displayedHeight);
+                
+                // 与管理器 render_direction_sectors 完全一致的计算逻辑
+                // direction: -90°=朝上(12点), 0°=朝右, 90°=朝下, ±180°=朝左
+                // 管理器: QPainterPath 角度从3点钟顺时针
+                // start_ang = -(ang + half) 其中 ang = direction
+                const ang = direction;  // 角度值（度）
+                const half = sectorAngle / 2;
+                const startAngDeg = -(ang + half);  // 起始角度（度）
+                
+                // 转为弧度（QPainterPath使用弧度，SVG也使用弧度）
+                const startAng = startAngDeg * Math.PI / 180;
+                const endAng = (startAngDeg + sectorAngle) * Math.PI / 180;
+                
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.classList.add('sector-svg');
+                svg.style.position = 'absolute';
+                svg.style.left = '0';
+                svg.style.top = '0';
+                svg.style.width = '100%';
+                svg.style.height = '100%';
+                svg.style.pointerEvents = 'none';
+                svg.style.zIndex = '5';
+                svg.setAttribute('viewBox', '0 0 ' + wrapper.clientWidth + ' ' + wrapper.clientHeight);
+                
+                // 扇形路径 - 与管理器使用相同的计算方式
+                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+                const r = radius;
+                
+                // 计算左边界点（起始角度）
+                const leftRad = startAng;
+                const lx = cx + r * Math.cos(leftRad);
+                const ly = cy - r * Math.sin(leftRad);  // SVG y轴向下，管理器用 cy - r*sin
+                
+                // 计算右边界点（结束角度）
+                const rightRad = endAng;
+                const rx = cx + r * Math.cos(rightRad);
+                const ry = cy - r * Math.sin(rightRad);
+                
+                // 构建路径：管理中心 -> 左边界 -> 弧线 -> 管理中心
+                const d = 'M ' + cx + ' ' + cy + 
+                          ' L ' + lx + ' ' + ly + 
+                          ' A ' + r + ' ' + r + ' 0 0 0 ' + rx + ' ' + ry + 
+                          ' Z';
+                
+                path.setAttribute('d', d);
+                path.setAttribute('fill', 'rgba(0, 122, 255, 0.25)');
+                path.setAttribute('stroke', 'rgba(255, 255, 255, 0.7)');
+                path.setAttribute('stroke-width', '1');
+                svg.appendChild(path);
+                
+                wrapper.appendChild(svg);
+            });
+        }
+
         function addZoomControls(container) {
             const controls = document.createElement('div');
             controls.className = 'zoom-controls';
@@ -4082,6 +4507,14 @@ class PanoramaManager(QMainWindow):
                 // 标记点大小不随缩放变化，保持可读性
                 dot.style.transform = 'translate(-50%, -50%)';
             });
+            
+            // 同步更新扇形
+            renderSectors(wrapper, markers, 
+                baseOffsetX + currentOffsetX, 
+                baseOffsetY + currentOffsetY,
+                displayedWidth * currentScale, 
+                displayedHeight * currentScale, 
+                currentScale);
         }
         
         function zoomIn() {
@@ -4126,7 +4559,7 @@ class PanoramaManager(QMainWindow):
         let isVREnabled = false;
         let vrViewerLeft = null;
         let vrViewerRight = null;
-        let viewMode = 'auto'; // 'auto' | 'panorama' | 'photo'
+        let viewMode = 'panorama'; // 'panorama' | 'photo'（默认全景）
         let currentPhotoIndex = 0;
         let photoScale = 1;
         let photoOffsetX = 0;
@@ -4134,6 +4567,7 @@ class PanoramaManager(QMainWindow):
         let isPhotoDragging = false;
         let photoDragStartX = 0;
         let photoDragStartY = 0;
+        let currentSectorDirection = null; // 扇形当前方向（null=使用marker.direction, 非null=全景同步方向）
         
         function loadPanorama(index) {
             const floor = floors[currentFloorIndex];
@@ -4150,6 +4584,22 @@ class PanoramaManager(QMainWindow):
             document.querySelectorAll('.marker-dot').forEach((dot, idx) => {
                 dot.classList.toggle('active', idx === index);
             });
+            
+            // 切换选中点位时重置扇形方向（使用新 marker 中的 direction 值）
+            // 先清空全景同步方向，让新点位的扇形使用自己的 direction
+            currentSectorDirection = null;
+            
+            // 切换选中点位时更新扇形显示
+            const wrapper = document.getElementById('floorplanWrapper');
+            if (wrapper) {
+                const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
+                const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
+                const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
+                const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
+                renderSectors(wrapper, floor.markers, 
+                    baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY,
+                    displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+            }
             
             // 如果该点位没有影像，显示提示并清空区域
             if (!marker.panoramaPath) {
@@ -4168,12 +4618,13 @@ class PanoramaManager(QMainWindow):
                 return;
             }
             
-            // 确定展示模式
+            // 确定展示模式 - 默认为全景模式
             const photos = marker.photos || [marker.panoramaPath];
             const photoCount = photos.length;
             let mode = viewMode;
             if (mode === 'auto') {
-                mode = (photoCount === 4) ? 'panorama' : 'photo';
+                // 默认使用全景模式
+                mode = 'panorama';
             }
             updateViewModeUI(mode);
             
@@ -4200,13 +4651,11 @@ class PanoramaManager(QMainWindow):
             const marker = floor.markers[currentMarkerIndex];
             if (!marker.panoramaPath) return;
             
-            const photos = marker.photos || [marker.panoramaPath];
-            if (viewMode === 'auto') {
-                viewMode = 'panorama';
-            } else if (viewMode === 'panorama') {
+            // 在全景和图片模式之间切换
+            if (viewMode === 'panorama') {
                 viewMode = 'photo';
             } else {
-                viewMode = 'auto';
+                viewMode = 'panorama';
             }
             loadPanorama(currentMarkerIndex);
         }
@@ -4230,16 +4679,93 @@ class PanoramaManager(QMainWindow):
             };
             
             if (photos.length === 4) {
-                // 4张照片使用 cubeMap 模式
                 config.type = 'cubemap';
                 config.cubeMap = photos;
             } else {
-                // 单张照片使用 equirectangular 模式
                 config.type = 'equirectangular';
                 config.panorama = photos[0];
             }
             
             viewer = pannellum.viewer('panorama', config);
+            
+            // 基准方向：来自管理器保存的值
+            let baseDirection = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') 
+                ? parseFloat(marker.direction) : -90;
+            let initialYaw = null;
+            // 重置同步方向为 null，让 renderSectors 使用 marker.direction 渲染初始扇形
+            currentSectorDirection = null;
+            
+            // 初始渲染一次扇形（使用管理器设置的方向）
+            const wrapper = document.getElementById('floorplanWrapper');
+            if (wrapper) {
+                const floor = floors[currentFloorIndex];
+                const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
+                const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
+                const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
+                const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
+                renderSectors(wrapper, floor.markers, 
+                    baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY,
+                    displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+            }
+            
+            // 监听全景视角变化，基于基准方向进行偏移量同步
+            const sendDirectionUpdate = (yaw) => {
+                if (initialYaw === null) {
+                    // 首次记录全景初始 yaw，不改变方向
+                    initialYaw = yaw;
+                    console.log('[全景] 初始视角 yaw:', yaw, '基准方向:', baseDirection);
+                    return;
+                }
+                // 计算相对于初始视角的偏移量
+                let delta = yaw - initialYaw;
+                if (Math.abs(delta) < 1) return; // 微小变化忽略
+                let newDirection = baseDirection + delta;
+                // 标准化到 [-180, 180]
+                newDirection = ((newDirection + 180) % 360 + 360) % 360 - 180;
+                currentSectorDirection = newDirection;
+                
+                // 重新渲染扇形
+                const wrapper = document.getElementById('floorplanWrapper');
+                if (wrapper) {
+                    const floor = floors[currentFloorIndex];
+                    const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
+                    const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
+                    const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
+                    const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
+                    renderSectors(wrapper, floor.markers, 
+                        baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY,
+                        displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                }
+                
+                // 同步到 PC 端
+                const currentMarker = floors[currentFloorIndex].markers[currentMarkerIndex];
+                if (currentMarker && currentMarker.id) {
+                // 发送最终计算出的方向（已标准化），而不是原始 yaw
+                let syncDir = ((newDirection + 180) % 360 + 360) % 360 - 180;
+                fetch(`/api/set_direction?marker_id=${encodeURIComponent(currentMarker.id)}&direction=${syncDir}`)
+                    .then(r => r.json())
+                    .then(data => console.log('[联动] 方向已同步:', data.direction))
+                    .catch(err => console.log('[联动] 同步失败:', err));
+                }
+            };
+            
+            // 清理旧的同步 interval
+            if (window._syncInterval) {
+                clearInterval(window._syncInterval);
+                window._syncInterval = null;
+            }
+
+            window._syncInterval = setInterval(() => {
+                if (!viewer) { 
+                    clearInterval(window._syncInterval); 
+                    window._syncInterval = null;
+                    return; 
+                }
+                try {
+                    const yaw = viewer.getYaw();
+                    sendDirectionUpdate(yaw);
+                } catch(e) {}
+            }, 100);
             
             if (isGyroEnabled && viewer) {
                 setTimeout(() => {
@@ -4252,6 +4778,8 @@ class PanoramaManager(QMainWindow):
         function showPhotoViewer(marker, photos) {
             document.getElementById('panorama').style.display = 'none';
             if (viewer) { viewer.destroy(); viewer = null; }
+            // 清理方向同步的 interval（通过全局变量）
+            if (window._syncInterval) { clearInterval(window._syncInterval); window._syncInterval = null; }
             
             const photoViewer = document.getElementById('photoViewer');
             photoViewer.classList.add('active');
@@ -4701,7 +5229,7 @@ class PanoramaManager(QMainWindow):
         # 尝试不同端口（跳过 8080，因为经常被占用）
         for port in [8888, 9000, 9999, 0]:
             try:
-                self.server_thread = HttpServerThread(viewer_dir, port, photo_base_dir=photo_base_dir)
+                self.server_thread = HttpServerThread(viewer_dir, port, photo_base_dir=photo_base_dir, parent_app=self)
                 self.server_thread.server_started.connect(self._on_server_started)
                 self.server_thread.error_occurred.connect(self._on_server_error)
                 self.server_thread.start()
@@ -4787,13 +5315,17 @@ class PanoramaManager(QMainWindow):
             traceback.print_exc()
             self.qr_label.setText(f"二维码生成失败，请手动输入地址\n{self.current_lan_url}")
         
-        self.server_info_group.setVisible(True)
+        # 默认不自动显示服务器信息，由用户手动展开
+        self.server_info_group.setVisible(False)
+        self.toggle_server_info_btn.setEnabled(True)
+        self.toggle_server_info_btn.setText("📡 显示服务器信息")
         self.stop_server_btn.setEnabled(True)
         self.open_web_btn.setEnabled(False)
         
-        # 延迟打开浏览器，确保服务器完全就绪
+        # 延迟打开浏览器，确保服务器完全就绪（添加缓存破坏参数）
         from PyQt6.QtCore import QTimer
-        QTimer.singleShot(800, lambda: webbrowser.open(self.current_local_url))
+        cached_url = self._cache_bust_url(self.current_local_url)
+        QTimer.singleShot(800, lambda: webbrowser.open(cached_url))
     
     def _copy_local_url(self):
         """复制本地地址到剪贴板"""
@@ -4853,6 +5385,8 @@ class PanoramaManager(QMainWindow):
         self.stop_server_btn.setEnabled(False)
         self.open_web_btn.setEnabled(True)
         self.qr_label.clear()
+        self.toggle_server_info_btn.setEnabled(False)
+        self.toggle_server_info_btn.setText("📡 显示服务器信息")
     
     def _on_marker_moved(self, marker_id: str, norm_x: float, norm_y: float):
         """采集点被拖动后更新坐标数据"""
@@ -4867,13 +5401,14 @@ class PanoramaManager(QMainWindow):
                     self.marker_coord_label.setText(f"({norm_x:.4f}, {norm_y:.4f})")
                     self.save_changes_btn.setStyleSheet("""
                         QPushButton {
-                            padding: 12px; font-size: 14px;
+                            padding: 6px 12px; font-size: 13px;
                             background-color: #FF9500; color: white;
                             border: none; border-radius: 6px;
                         }
                         QPushButton:hover { background-color: #B36800; }
                     """)
                     self.save_changes_btn.setText("💾 保存修改（已变更）")
+                    self.canvas.render_direction_sectors()
                     return
 
     def _on_marker_add_requested(self, norm_x: float, norm_y: float):
@@ -4898,13 +5433,13 @@ class PanoramaManager(QMainWindow):
                     'endTime': '',
                     'panoramaPath': '',
                     'originalPhotoPath': '',
-                    'direction': None
+                    'direction': -90.0  # 新采集点默认朝上
                 }
                 floor_data.setdefault('markers', []).append(new_marker)
                 self.canvas.add_marker(new_id, norm_x, norm_y, 'pending', new_id)
                 self.save_changes_btn.setStyleSheet("""
                     QPushButton {
-                        padding: 12px; font-size: 14px;
+                        padding: 6px 12px; font-size: 13px;
                         background-color: #FF9500; color: white;
                         border: none; border-radius: 6px;
                     }
@@ -4923,15 +5458,39 @@ class PanoramaManager(QMainWindow):
 
     def _on_marker_context_menu(self, marker_id: str, global_pos):
         """采集点右键菜单"""
-        menu = QMenu(self)
-        move_action = menu.addAction("🔄 移动位置（已支持左键拖动）")
-        delete_action = menu.addAction("🗑️ 删除点位")
-        relink_action = menu.addAction("📷 重新关联照片...")
-        action = menu.exec(global_pos)
-        if action == delete_action:
-            self._delete_marker(marker_id)
-        elif action == relink_action:
-            self._relink_marker_photo(marker_id)
+        try:
+            menu = QMenu(self)
+            
+            relink_action = QAction("📷 重新关联照片", self)
+            delete_action = QAction("🗑️ 删除采集点", self)
+            sector_action = QAction("🔍 显示/隐藏所有扇形", self)
+            adjust_action = QAction("✏️ 调整基准方向模式", self)
+            
+            menu.addAction(relink_action)
+            menu.addAction(delete_action)
+            menu.addSeparator()
+            menu.addAction(sector_action)
+            menu.addSeparator()
+            menu.addAction(adjust_action)
+            
+            # 使用 triggered.connect 方式连接信号
+            relink_action.triggered.connect(lambda: self._relink_marker_photo(marker_id))
+            delete_action.triggered.connect(lambda: self._delete_marker(marker_id))
+            sector_action.triggered.connect(lambda: self._toggle_sector())
+            adjust_action.triggered.connect(lambda: self._toggle_adjust_mode(marker_id))
+            
+            # 转换为 QPoint
+            if isinstance(global_pos, QPointF):
+                pos = global_pos.toPoint()
+            else:
+                pos = global_pos
+            
+            menu.exec(pos)
+        except Exception as e:
+            print(f"[错误] 右键菜单异常: {e}")
+            import traceback
+            traceback.print_exc()
+
 
     def _find_photo_base_dir(self, search_dir: str = None) -> str:
         """智能查找照片根目录：优先 photoBaseDir，其次扫描指定目录或项目附近的照片文件夹"""
@@ -5037,11 +5596,186 @@ class PanoramaManager(QMainWindow):
                 print(f"[调试]   -> 使用 panoramaPath (绝对): {result}")
                 return result
         
-        # 3. 如果都无法解析，保留原始值而不是返回空字符串
-        original_path = marker_data.get('panoramaPath', '')
-        print(f"[警告] _resolve_marker_panorama_path: 无法解析路径，保留原值: {original_path}")
-        return original_path
+        # 3. 如果都无法解析，保留原始值而不是返回空字符串（注意：这里是和 if path: 同级）
+        # 优先使用 panoramaPath，其次 originalPhotoPath
+        original_path = marker_data.get('panoramaPath', '') or marker_data.get('originalPhotoPath', '')
+        if original_path:
+            print(f"[警告] _resolve_marker_panorama_path: 无法解析路径，保留原值: {original_path}")
+            return original_path
+        
+        # 4. 最终兜底：返回空字符串（确实没有任何路径信息）
+        print(f"[错误] _resolve_marker_panorama_path: {marker_name} 没有任何照片路径信息!")
+        return ''
 
+    def _toggle_adjust_mode(self, marker_id: str):
+        """切换调整模式：鼠标绕采集点中心旋转扇形，双击确认退出"""
+        self._adjust_mode = getattr(self, '_adjust_mode', False)
+        
+        self._adjust_mode = not self._adjust_mode
+        
+        if self._adjust_mode:
+            # 进入调整模式
+            self.import_status_label.setText("🔧 调整模式：鼠标绕采集点旋转扇形 | 双击平面确认角度")
+            self.rotate_left_btn.setStyleSheet("""
+                QPushButton {
+                    padding: 6px 10px; font-size: 12px;
+                    background-color: #FF9500; color: white;
+                    border: none; border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #B36800; }
+            """)
+            self.rotate_right_btn.setStyleSheet("""
+                QPushButton {
+                    padding: 6px 10px; font-size: 12px;
+                    background-color: #FF9500; color: white;
+                    border: none; border-radius: 4px;
+                }
+                QPushButton:hover { background-color: #B36800; }
+            """)
+            # 设置画布为调整模式
+            self.canvas._adjust_mode = True
+            self.canvas._adjust_marker_id = marker_id
+            
+            QMessageBox.information(self, "调整模式", 
+                "已进入扇形视线调整模式。\n\n"
+                "移动鼠标：绕采集点中心旋转扇形方向。\n"
+                "双击平面：确认当前角度并退出编辑状态。\n"
+                "也可以使用「↺ 左转」/「右转 ↻」按钮调整。\n\n"
+                "确认后，浏览器旋转全景图时将以此新基准为准同步旋转。")
+        else:
+            # 退出调整模式
+            self._exit_adjust_mode()
+    
+    def _exit_adjust_mode(self):
+        """退出调整模式 - 确认当前扇形方向为新的默认方向"""
+        self._adjust_mode = False
+        self.import_status_label.setText("就绪")
+        self.rotate_left_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 10px; font-size: 12px;
+                background-color: #3A3A3C; color: white;
+                border: none; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #48484A; }
+        """)
+        self.rotate_right_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 10px; font-size: 12px;
+                background-color: #3A3A3C; color: white;
+                border: none; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #48484A; }
+        """)
+        self.save_changes_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px; font-size: 13px;
+                background-color: #FF9500; color: white;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #B36800; }
+        """)
+        self.save_changes_btn.setText("💾 保存修改（已变更）")
+        
+        # 获取当前调整的点位方向，保存为新的默认方向
+        marker_id = self.canvas._adjust_marker_id
+        saved = False
+        if marker_id:
+            item = self.canvas.marker_items.get(marker_id)
+            if item:
+                final_direction = item.data(2)
+                if final_direction is not None:
+                    # 更新数据模型中的 direction 为确认后的方向
+                    for floor_data in self.project_data.floors:
+                        for marker_data in floor_data.get('markers', []):
+                            if marker_data['id'] == marker_id:
+                                marker_data['direction'] = float(final_direction)
+                                break
+                    # 保存到 project.json，增加异常处理和日志
+                    try:
+                        self._save_project()
+                        print(f"[调试] 已保存扇形方向 {final_direction:.1f}° 为新的默认方向")
+                        saved = True
+                    except Exception as e:
+                        print(f"[错误] 保存扇形方向失败: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        QMessageBox.critical(self, "保存失败", f"无法保存扇形方向:\n{e}")
+        
+        # 恢复画布状态
+        self.canvas._adjust_mode = False
+        self.canvas._adjust_marker_id = None
+        
+        # 给出明确的完成提示
+        if saved:
+            QMessageBox.information(self, "完成", f"已确认扇形视线角度并保存到项目。")
+        else:
+            QMessageBox.information(self, "完成", "已确认扇形视线角度并退出编辑状态。")
+
+    def _toggle_server_info(self):
+        """切换服务器信息的显示/隐藏"""
+        visible = self.server_info_group.isVisible()
+        self.server_info_group.setVisible(not visible)
+        if visible:
+            self.toggle_server_info_btn.setText("📡 显示服务器信息")
+        else:
+            self.toggle_server_info_btn.setText("📡 隐藏服务器信息")
+
+    def _on_marker_info_group_toggled(self, checked):
+        """点位信息组折叠/展开"""
+        for child in self.marker_info_group.findChildren(QWidget):
+            if child != self.marker_info_group:
+                child.setVisible(checked)
+
+    def _on_linked_photos_group_toggled(self, checked):
+        """已关联照片组折叠/展开"""
+        for child in self.linked_photos_group.findChildren(QWidget):
+            if child != self.linked_photos_group:
+                child.setVisible(checked)
+
+    def _toggle_sector(self, marker_id: str = None):
+        """切换所有点位的扇形视线范围显示"""
+        # 判断当前状态：如果已有扇形显示，则全部关闭；否则全部开启
+        current_floor_data = None
+        for f in self.project_data.floors:
+            if f['id'] == self.current_floor_id:
+                current_floor_data = f
+                break
+        
+        if not current_floor_data:
+            return
+        
+        # 检查是否已有扇形显示（通过检查 scene 中是否有 sector 项）
+        has_sectors = False
+        for item in self.canvas.scene.items():
+            if isinstance(item, QGraphicsPathItem) and item.data(0) and str(item.data(0)).endswith('_sector'):
+                has_sectors = True
+                break
+        
+        if has_sectors:
+            # 全部关闭：将所有有 direction 的点位设为 None（保留原值在临时存储中）
+            for marker_data in current_floor_data.get('markers', []):
+                if marker_data.get('direction') is not None:
+                    marker_data['_prev_direction'] = marker_data['direction']
+                    marker_data['direction'] = None
+        else:
+            # 全部开启：恢复之前保存的值，或设为默认值 -90
+            for marker_data in current_floor_data.get('markers', []):
+                prev = marker_data.pop('_prev_direction', None)
+                marker_data['direction'] = prev if prev is not None else -90.0
+        
+        self.canvas.clear_markers()
+        self._load_floor(self.current_floor_id)
+        self.canvas.render_direction_sectors()
+        self.save_changes_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px; font-size: 13px;
+                background-color: #FF9500; color: white;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #B36800; }
+        """)
+        self.save_changes_btn.setText("💾 保存修改（已变更）")
+    
     def _delete_marker(self, marker_id: str):
         """删除采集点"""
         if not self.project_data:
@@ -5059,7 +5793,7 @@ class PanoramaManager(QMainWindow):
                     self._load_floor(self.current_floor_id)
                     self.save_changes_btn.setStyleSheet("""
                         QPushButton {
-                            padding: 12px; font-size: 14px;
+                            padding: 6px 12px; font-size: 13px;
                             background-color: #FF9500; color: white;
                             border: none; border-radius: 6px;
                         }
@@ -5086,20 +5820,28 @@ class PanoramaManager(QMainWindow):
                     marker_data['cameraFileName'] = fname
                     marker_data['originalPhotoPath'] = file_path
                     marker_data['status'] = 'linked'
-                    # 尝试复制到项目目录
-                    try:
-                        target = os.path.join(self.project_dir, 'photos', fname)
-                        os.makedirs(os.path.dirname(target), exist_ok=True)
-                        shutil.copy2(file_path, target)
-                        marker_data['panoramaPath'] = os.path.join('photos', fname).replace('\\', '/')
-                    except Exception as e:
-                        print(f"[警告] 复制照片失败: {e}")
+                    
+                    # 直接使用 external_photos 路径，不复制
+                    photo_base_dir = self._find_photo_base_dir()
+                    if photo_base_dir and os.path.exists(photo_base_dir):
+                        try:
+                            rel = os.path.relpath(file_path, photo_base_dir).replace('\\', '/')
+                            marker_data['panoramaPath'] = 'external_photos/' + rel
+                        except ValueError:
+                            marker_data['panoramaPath'] = 'external_photos/' + fname
+                    else:
+                        marker_data['panoramaPath'] = 'external_photos/' + fname
+                    
+                    # 最终兜底
+                    if not marker_data.get('panoramaPath'):
+                        marker_data['panoramaPath'] = 'external_photos/' + fname
+                    
                     self._on_marker_selected(marker_id)
                     self.canvas.clear_markers()
                     self._load_floor(self.current_floor_id)
                     self.save_changes_btn.setStyleSheet("""
                         QPushButton {
-                            padding: 12px; font-size: 14px;
+                            padding: 6px 12px; font-size: 13px;
                             background-color: #FF9500; color: white;
                             border: none; border-radius: 6px;
                         }
@@ -5175,19 +5917,189 @@ class PanoramaManager(QMainWindow):
                         print(f"[警告] 复制照片失败: {e}")
                         import traceback
                         traceback.print_exc()
+                    # 兜底：如果复制失败，直接用 external_photos 路径
+                    if not marker_data.get('panoramaPath'):
+                        marker_data['panoramaPath'] = 'external_photos/' + fname
                     self._on_marker_selected(marker_id)
                     self.canvas.clear_markers()
                     self._load_floor(self.current_floor_id)
                     self.save_changes_btn.setStyleSheet("""
                         QPushButton {
-                            padding: 12px; font-size: 14px;
+                            padding: 6px 12px; font-size: 13px;
                             background-color: #FF9500; color: white;
                             border: none; border-radius: 6px;
                         }
                         QPushButton:hover { background-color: #B36800; }
                     """)
                     self.save_changes_btn.setText("💾 保存修改（已变更）")
+                    
+                    # 如果在调整模式，更新提示
+                    if getattr(self, '_adjust_mode', False):
+                        self.import_status_label.setText(f"🔧 调整模式 - 当前基准: {new_dir:.0f}°")
+                    
                     return
+
+    def _update_photo_preview(self):
+        """更新照片预览"""
+        if not hasattr(self, 'current_marker') or not self.current_marker:
+            self.photo_preview.setText("无照片")
+            return
+        
+        # 获取照片路径
+        photo_path = self.current_marker.originalPhotoPath or self.current_marker.panoramaPath
+        if not photo_path:
+            self.photo_preview.setText("无照片")
+            return
+        
+        # 如果是相对路径，尝试转换为绝对路径
+        if not os.path.isabs(photo_path):
+            photo_base_dir = self._find_photo_base_dir()
+            if photo_base_dir:
+                # 处理 external_photos/ 前缀
+                if photo_path.startswith('external_photos/'):
+                    sub_path = photo_path[len('external_photos/'):]
+                    photo_path = os.path.join(photo_base_dir, sub_path)
+                else:
+                    photo_path = os.path.join(self.project_dir, photo_path)
+        
+        # 加载并显示缩略图
+        if os.path.exists(photo_path):
+            pixmap = QPixmap(photo_path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(200, 150, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.photo_preview.setPixmap(scaled)
+            else:
+                self.photo_preview.setText("无法加载图片")
+        else:
+            self.photo_preview.setText("文件不存在")
+    
+    def _rotate_sector(self, angle_delta: float):
+        """旋转当前选中标记点的扇形方向"""
+        if not hasattr(self, 'current_marker') or not self.current_marker:
+            return
+        
+        marker_id = self.current_marker.id
+        
+        # 更新数据模型
+        for floor_data in self.project_data.floors:
+            for marker_data in floor_data.get('markers', []):
+                if marker_data['id'] == marker_id:
+                    current_dir = marker_data.get('direction', -90.0)
+                    if current_dir is None:
+                        current_dir = -90.0
+                    new_dir = (current_dir + angle_delta) % 360
+                    if new_dir > 180:
+                        new_dir -= 360
+                    marker_data['direction'] = new_dir
+                    
+                    # 更新画布
+                    self.canvas.rotate_sector(marker_id, angle_delta)
+                    
+                    # 更新显示
+                    self.direction_label.setText(f"{new_dir:.0f}°")
+                    
+                    # 更新当前标记点
+                    self.current_marker.direction = new_dir
+                    
+                    # 标记已修改
+                    self.save_changes_btn.setStyleSheet("""
+                        QPushButton {
+                            padding: 6px 12px; font-size: 13px;
+                            background-color: #FF9500; color: white;
+                            border: none; border-radius: 6px;
+                        }
+                        QPushButton:hover { background-color: #B36800; }
+                    """)
+                    self.save_changes_btn.setText("💾 保存修改（已变更）")
+                    
+                    # 保存扇形方向到 project.json
+                    self._save_project()
+                    
+                    # 如果在调整模式，更新状态提示
+                    if getattr(self, '_adjust_mode', False):
+                        self.import_status_label.setText(f"🔧 调整模式 - 当前基准: {new_dir:.0f}°")
+                    
+                    return
+    
+    def _align_to_panorama(self):
+        """将扇形方向对齐到全景照片的当前视角"""
+        if not hasattr(self, 'current_marker') or not self.current_marker:
+            return
+        
+        # 弹出对话框让用户输入全景的当前视角
+        current_yaw, ok = QInputDialog.getDouble(
+            self, "对齐全景", 
+            "请输入全景照片当前视角（yaw值，度）:\n"
+            "(在全景查看器中拖动视角，查看显示的yaw值)\n\n"
+            "0度 = 朝前, 90度 = 朝右, -90度 = 朝左",
+            value=0, min=-180, max=180, decimals=1
+        )
+        
+        if not ok:
+            return
+        
+        # 转换：全景 yaw 0度（朝前）对应扇形 direction -90度（朝上，12点钟方向）
+        aligned_direction = (-current_yaw - 90) % 360
+        if aligned_direction > 180:
+            aligned_direction -= 360
+        
+        # 应用新方向
+        marker_id = self.current_marker.id
+        for floor_data in self.project_data.floors:
+            for marker_data in floor_data.get('markers', []):
+                if marker_data['id'] == marker_id:
+                    current_dir = marker_data.get('direction', -90.0) or -90.0
+                    delta = aligned_direction - current_dir
+                    
+                    marker_data['direction'] = aligned_direction
+                    
+                    # 更新画布
+                    self.canvas.rotate_sector(marker_id, delta)
+                    
+                    # 更新显示
+                    self.direction_label.setText(f"{aligned_direction:.0f}°")
+                    self.current_marker.direction = aligned_direction
+                    
+                    # 标记已修改
+                    self.save_changes_btn.setStyleSheet("""
+                        QPushButton {
+                            padding: 6px 12px; font-size: 13px;
+                            background-color: #FF9500; color: white;
+                            border: none; border-radius: 6px;
+                        }
+                        QPushButton:hover { background-color: #B36800; }
+                    """)
+                    self.save_changes_btn.setText("💾 保存修改（已变更）")
+                    
+                    # 保存扇形方向到 project.json
+                    self._save_project()
+                    return
+
+    def _on_direction_update_from_web(self, marker_id: str, direction: float):
+        """从 Web Viewer 接收到的方向更新（实时同步显示，不保存到文件）"""
+        # 如果在调整模式，忽略实时同步
+        if getattr(self, '_adjust_mode', False):
+            return
+        
+        print(f"[联动] 收到方向更新: marker={marker_id}, direction={direction:.1f}°")
+        
+        # 更新画布上的扇形（仅实时显示）
+        item = self.canvas.marker_items.get(marker_id)
+        if item:
+            item.setData(2, direction)
+            self.canvas.render_direction_sectors()
+        
+        # 更新内存中的数据模型（不保存文件）
+        for floor_data in self.project_data.floors:
+            for marker_data in floor_data.get('markers', []):
+                if marker_data['id'] == marker_id:
+                    marker_data['direction'] = direction
+                    break
+        
+        # 如果当前选中的是这个标记点，更新显示
+        if hasattr(self, 'current_marker') and self.current_marker and self.current_marker.id == marker_id:
+            self.current_marker.direction = direction
+            self.direction_label.setText(f"{direction:.0f}°")
 
     def _delete_current_marker(self):
         """从右侧删除当前选中的点位"""
@@ -5197,7 +6109,14 @@ class PanoramaManager(QMainWindow):
         self.marker_info_group.setEnabled(False)
 
     def _on_marker_double_clicked(self, marker_id: str):
-        """双击点位替换照片"""
+        """双击点位 - 如果处于调整模式则确认退出，否则替换照片"""
+        # 如果是调整模式确认信号
+        if marker_id == '__ADJUST_MODE_CONFIRM__':
+            self._exit_adjust_mode()
+            QMessageBox.information(self, "完成", "已确认扇形视线角度并退出编辑状态。")
+            return
+        
+        # 正常双击：替换照片
         photo_base_dir = self._find_photo_base_dir()
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择替换的照片", photo_base_dir,
@@ -5212,16 +6131,18 @@ class PanoramaManager(QMainWindow):
             return
         try:
             self._save_project()
-            # 如果 viewer 已存在，静默重新生成
+            # 强制重新生成 viewer
             viewer_dir = os.path.join(self.project_dir, 'viewer')
-            if os.path.exists(viewer_dir):
-                try:
-                    self._regenerate_viewer(viewer_dir)
-                except Exception as e:
-                    print(f"[警告] 重新生成查看器失败: {e}")
+            os.makedirs(viewer_dir, exist_ok=True)
+            self._regenerate_viewer(viewer_dir)
+            
+            # 如果服务器在运行，自动打开浏览器刷新（添加缓存破坏参数）
+            if self.server_thread and self.server_thread.is_running:
+                webbrowser.open(self._cache_bust_url(self.current_local_url))
+            
             self.save_changes_btn.setStyleSheet("""
                 QPushButton {
-                    padding: 12px; font-size: 14px;
+                    padding: 6px 12px; font-size: 13px;
                     background-color: #5856D6; color: white;
                     border: none; border-radius: 6px;
                 }
@@ -5229,38 +6150,28 @@ class PanoramaManager(QMainWindow):
                 QPushButton:disabled { background-color: #CCC; }
             """)
             self.save_changes_btn.setText("💾 保存修改到项目")
-            QMessageBox.information(self, "成功", "项目修改已保存")
+            QMessageBox.information(self, "成功", "项目已保存，浏览器正在刷新...")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存失败: {e}")
+            import traceback
+            error_msg = traceback.format_exc()
+            print(f"[错误] 保存失败: {error_msg}")
+            QMessageBox.critical(self, "错误", f"保存失败:\n{str(e)}\n\n详细信息已写入日志")
 
     def _regenerate_viewer(self, viewer_dir: str):
-        """静默重新生成查看器（不弹提示）"""
-        # 处理外部照片目录
+        """静默重新生成查看器（只更新数据和HTML，不重建照片链接）"""
         photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
-        external_photos_link = os.path.join(viewer_dir, 'external_photos')
-        if photo_base_dir and os.path.exists(photo_base_dir):
-            if os.path.exists(external_photos_link):
-                if os.path.islink(external_photos_link) or os.path.isdir(external_photos_link):
-                    os.remove(external_photos_link) if os.path.islink(external_photos_link) else shutil.rmtree(external_photos_link)
-            try:
-                if sys.platform == 'win32':
-                    import subprocess
-                    link_arg = external_photos_link.replace('/', '\\')
-                    target_arg = photo_base_dir.replace('/', '\\')
-                    subprocess.run(['cmd', '/c', 'mklink', '/J', link_arg, target_arg], check=True, capture_output=True)
-                else:
-                    os.symlink(photo_base_dir, external_photos_link)
-            except Exception:
-                shutil.copytree(photo_base_dir, external_photos_link, dirs_exist_ok=True)
-        # 复制项目数据，调整 panoramaPath
+        
+        # 只更新 project.json，不碰 external_photos
         project_copy = self.project_data.to_dict()
         if photo_base_dir and os.path.exists(photo_base_dir):
             for floor_data in project_copy.get('floors', []):
                 for marker_data in floor_data.get('markers', []):
-                    marker_data['panoramaPath'] = self._resolve_marker_panorama_path(marker_data, photo_base_dir)
+                    if marker_data.get('status') == 'linked' and marker_data.get('panoramaPath'):
+                        marker_data['panoramaPath'] = self._resolve_marker_panorama_path(marker_data, photo_base_dir)
         with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
             json.dump(project_copy, f, ensure_ascii=False, indent=2)
-        # 复制平面图
+        
+        # 复制平面图（可能更新了）
         for floor_data in self.project_data.floors:
             floor_id = floor_data['id']
             src = os.path.join(self.project_dir, f'floorplan_{floor_id}.jpg')
@@ -5268,7 +6179,8 @@ class PanoramaManager(QMainWindow):
                 src = os.path.join(self.project_dir, self.project_data.floorplan)
             if os.path.exists(src):
                 shutil.copy2(src, os.path.join(viewer_dir, f'floorplan_{floor_id}.jpg'))
-        # 生成 HTML
+        
+        # 重新生成 HTML
         self._generate_viewer_html(viewer_dir)
 
     def _export_for_capture(self):

@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import (
     QSlider, QInputDialog
 )
 from PyQt6.QtCore import Qt, QRectF, QPointF, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QBrush, QColor, QFont, QIcon, QAction, QPainterPath
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QPen, QBrush, QColor, QFont, QIcon, QAction, QPainterPath, QPalette
 
 from PIL import Image, ImageDraw, ImageFont
 from PIL.ExifTags import TAGS
@@ -404,6 +404,7 @@ class HttpServerThread(QThread):
                 self.server = ThreadedHTTPServer(("", self.port), CustomHandler)
             
             actual_port = self.server.socket.getsockname()[1]
+            self.actual_port = actual_port  # 保存实际端口供外部读取
             self.is_running = True
             
             # 获取本机 IP
@@ -1299,6 +1300,7 @@ class FloorplanCanvas(QGraphicsView):
         self._drag_start_pos = None
         self._drag_item_start_pos = None
         self._panning = False
+        self._hovered_marker_id = None
 
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -1372,6 +1374,7 @@ class FloorplanCanvas(QGraphicsView):
             text = QGraphicsTextItem(str(label))
             text.setPos(pixel_x + radius + 2, pixel_y - radius)
             text.setDefaultTextColor(QColor(255, 255, 255))
+            text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)  # 文本不拦截鼠标
             self.scene.addItem(text)
             self.text_items.append(text)
 
@@ -1415,7 +1418,7 @@ class FloorplanCanvas(QGraphicsView):
         for marker_id, ellipse in self.marker_items.items():
             direction = ellipse.data(2)
             if direction is None:
-                direction = -90.0
+                continue
             try:
                 direction = float(direction)
             except (TypeError, ValueError):
@@ -1483,13 +1486,18 @@ class FloorplanCanvas(QGraphicsView):
             if getattr(self, '_adjust_mode', False):
                 self._last_adjust_pos = event.pos()
                 return
-            item = self.itemAt(event.pos())
-            if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
-                self._dragging_marker = item
-                self.selected_marker_id = item.data(0)
+            # 穿透上层扇形/文本，确保命中采集点椭圆
+            target_item = None
+            for item in self.items(event.pos()):
+                if isinstance(item, QGraphicsEllipseItem) and item.data(0):
+                    target_item = item
+                    break
+            if target_item:
+                self._dragging_marker = target_item
+                self.selected_marker_id = target_item.data(0)
                 self._drag_start_pos = scene_pos
-                self._drag_item_start_pos = item.pos()
-                item.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self._drag_item_start_pos = target_item.pos()
+                target_item.setCursor(Qt.CursorShape.ClosedHandCursor)
                 self.marker_selected.emit(str(self.selected_marker_id))
                 return
             else:
@@ -1562,6 +1570,33 @@ class FloorplanCanvas(QGraphicsView):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             return
+        else:
+            # 悬停检测：指针在采集点上时变黄
+            target_item = None
+            for item in self.items(event.pos()):
+                if isinstance(item, QGraphicsEllipseItem) and item.data(0):
+                    target_item = item
+                    break
+            
+            if target_item:
+                marker_id = str(target_item.data(0))
+                if self._hovered_marker_id != marker_id:
+                    # 恢复上一个悬停点的颜色
+                    if self._hovered_marker_id and self._hovered_marker_id in self.marker_items:
+                        old_item = self.marker_items[self._hovered_marker_id]
+                        old_status = old_item.data(1)
+                        old_item.setBrush(QBrush(self._get_status_color(old_status)))
+                    
+                    self._hovered_marker_id = marker_id
+                    target_item.setBrush(QBrush(QColor(255, 204, 0)))  # 黄色高亮
+                    target_item.setCursor(Qt.CursorShape.OpenHandCursor)
+            else:
+                if self._hovered_marker_id and self._hovered_marker_id in self.marker_items:
+                    old_item = self.marker_items[self._hovered_marker_id]
+                    old_status = old_item.data(1)
+                    old_item.setBrush(QBrush(self._get_status_color(old_status)))
+                    self._hovered_marker_id = None
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -1593,18 +1628,46 @@ class FloorplanCanvas(QGraphicsView):
                 self.marker_double_clicked.emit('__ADJUST_MODE_CONFIRM__')
                 return
             
-            item = self.itemAt(event.pos())
-            if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
-                self.marker_double_clicked.emit(str(item.data(0)))
+            # 穿透上层扇形/文本，确保命中采集点椭圆
+            target_item = None
+            for item in self.items(event.pos()):
+                if isinstance(item, QGraphicsEllipseItem) and item.data(0):
+                    target_item = item
+                    break
+            if target_item:
+                self.marker_double_clicked.emit(str(target_item.data(0)))
                 return
         super().mouseDoubleClickEvent(event)
+
+    def _get_status_color(self, status: str) -> QColor:
+        """根据状态返回颜色"""
+        colors = {
+            'pending': QColor(128, 128, 128),
+            'captured': QColor(0, 122, 255),
+            'linked': QColor(52, 199, 89),
+            'missing': QColor(255, 59, 48)
+        }
+        return colors.get(status, QColor(128, 128, 128))
+    
+    def clear_hover(self):
+        """清除悬停高亮"""
+        if self._hovered_marker_id and self._hovered_marker_id in self.marker_items:
+            old_item = self.marker_items[self._hovered_marker_id]
+            old_status = old_item.data(1)
+            old_item.setBrush(QBrush(self._get_status_color(old_status)))
+            self._hovered_marker_id = None
 
     def contextMenuEvent(self, event):
         try:
             scene_pos = self.mapToScene(event.pos())
-            item = self.itemAt(event.pos())
-            if item and isinstance(item, QGraphicsEllipseItem) and item.data(0):
-                marker_id = str(item.data(0))
+            # 穿透上层扇形/文本，确保能命中采集点椭圆
+            target_item = None
+            for item in self.items(event.pos()):
+                if isinstance(item, QGraphicsEllipseItem) and item.data(0):
+                    target_item = item
+                    break
+            if target_item:
+                marker_id = str(target_item.data(0))
                 if marker_id:
                     self.marker_context_menu.emit(marker_id, QPointF(event.globalPos()))
                     return
@@ -1623,16 +1686,725 @@ class FloorplanCanvas(QGraphicsView):
 
 
     def wheelEvent(self, event):
-        """鼠标滚轮缩放"""
+        """鼠标滚轮缩放——以鼠标位置为基准点"""
         factor = 1.15
         if event.angleDelta().y() < 0:
             factor = 1.0 / factor
+
+        # 记录缩放前鼠标位置对应的场景坐标
+        mouse_pos = event.position().toPoint()
+        old_scene_pos = self.mapToScene(mouse_pos)
+
+        # 执行缩放
         self.scale(factor, factor)
+
+        # 计算缩放后该场景坐标在视图中的新位置
+        new_view_pos = self.mapFromScene(old_scene_pos)
+
+        # 计算偏移量，使鼠标位置对应的场景点保持在原位
+        delta = new_view_pos - mouse_pos
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + delta.x())
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() + delta.y())
 
 
 # =============================================================================
 # 主窗口
 # =============================================================================
+
+class FloatingToolbar(QFrame):
+    """可拖动的悬浮快捷操作按钮栏 - 支持横向/竖向排列和按钮可见性控制"""
+
+    BUTTON_CONFIG = {
+        'relink': {'text': '重新关联', 'tooltip': '重新关联单点照片'},
+        'delete': {'text': '删除当前', 'tooltip': '删除当前点位'},
+        'sector': {'text': '显/隐扇形', 'tooltip': '显示/隐藏全部扇形视线'},
+        'adjust': {'text': '调点方向', 'tooltip': '调整单点扇形视线方向'},
+        'set_all': {'text': '调全方向', 'tooltip': '调整所有点扇形视线方向'},
+    }
+
+    # 信号：按钮点击的转发，避免按钮被重建时丢失连接
+    relink_clicked = pyqtSignal()
+    delete_clicked = pyqtSignal()
+    sector_clicked = pyqtSignal()
+    adjust_clicked = pyqtSignal()
+    set_all_clicked = pyqtSignal()
+
+    def __init__(self, parent=None, settings=None):
+        super().__init__(parent)
+        self._settings = settings or self._default_settings()
+        self.buttons = {}
+        self._dragging = False
+        self._drag_start = None
+        self._init_ui()
+        self._apply_style()
+
+    def _default_settings(self):
+        return {
+            'visible': True,
+            'orientation': 'horizontal',
+            'button_visibility': {
+                'relink': True, 'delete': True, 'sector': True,
+                'adjust': True, 'set_all': True,
+            },
+            'position': {'x': 10, 'y': 70},
+        }
+
+    def get_settings(self):
+        return {
+            'visible': self.isVisible(),
+            'orientation': self._settings.get('orientation', 'vertical'),
+            'button_visibility': {
+                key: btn.isVisible() for key, btn in self.buttons.items()
+            },
+            'position': {'x': self.x(), 'y': self.y()},
+        }
+
+    def update_settings(self, settings):
+        self._settings = settings
+        self._rebuild_layout()
+        self._apply_style()
+        self.setVisible(settings.get('visible', True))
+        # 切换方向后，确保位置合理
+        parent = self.parent()
+        if parent:
+            if self._settings.get('orientation', 'vertical') == 'horizontal':
+                # 横向：底部居中
+                x = 10
+                y = 130
+                self.move(x, y)
+            else:
+                # 竖向：右侧
+                x = max(10, parent.width() - 90 - 10)
+                self.move(x, self.y())
+
+    def _init_ui(self):
+        self._rebuild_layout()
+
+    def _rebuild_layout(self):
+        old_layout = self.layout()
+        if old_layout:
+            # 安全清理：先收集所有widget，移除后再deleteLater
+            widgets_to_delete = []
+            while old_layout.count():
+                item = old_layout.takeAt(0)
+                w = item.widget()
+                if w:
+                    widgets_to_delete.append(w)
+                    w.setParent(None)
+            old_layout.deleteLater()
+            # 延迟删除widget，避免半销毁状态导致setStyleSheet崩溃
+            for w in widgets_to_delete:
+                w.deleteLater()
+
+        orientation = self._settings.get('orientation', 'vertical')
+        is_vertical = orientation == 'vertical'
+
+        parent = self.parent()
+
+        if is_vertical:
+            layout = QVBoxLayout(self)
+            # 竖向：右侧，使用当前y坐标或默认值
+            if parent:
+                x = max(10, parent.width() - 90 - 10)
+                y = self.y() if self.y() > 0 else 70
+                self.setGeometry(x, y, 90, 230)
+            else:
+                self.setGeometry(self.x(), self.y(), 90, 230)
+        else:
+            layout = QHBoxLayout(self)
+            # 横向：底部居中
+            if parent:
+                x = 10
+                y = 130
+                self.setGeometry(x, y, 380, 50)
+            else:
+                self.setGeometry(self.x(), self.y(), 380, 50)
+
+        layout.setSpacing(6)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        if is_vertical:
+            title = QLabel(" 快捷操作")
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(title)
+
+        visibility = self._settings.get('button_visibility', {})
+        for key, config in self.BUTTON_CONFIG.items():
+            if visibility.get(key, True):
+                btn = QPushButton(config['text'])
+                btn.setToolTip(config['tooltip'])
+                # 统一连接到内部转发器，避免外部直接连接到具体按钮实例
+                btn.clicked.connect(lambda checked=False, k=key: self._on_button_clicked(k))
+                layout.addWidget(btn)
+                self.buttons[key] = btn
+
+        if is_vertical:
+            layout.addStretch()
+
+        # 恢复按钮的启用状态：如果父窗口实现了 _update_floating_toolbar，让父窗口来设置状态
+        parent = self.parent()
+        if parent and hasattr(parent, '_update_floating_toolbar'):
+            try:
+                parent._update_floating_toolbar()
+            except Exception:
+                pass
+        else:
+            # 默认启用（除非父窗口在后续更新中覆盖）
+            for k, b in self.buttons.items():
+                b.setEnabled(True)
+
+    def _on_button_clicked(self, key: str):
+        """内部转发，请勿在外部直接连接 button.clicked 信号"""
+        if key == 'relink':
+            self.relink_clicked.emit()
+        elif key == 'delete':
+            self.delete_clicked.emit()
+        elif key == 'sector':
+            self.sector_clicked.emit()
+        elif key == 'adjust':
+            self.adjust_clicked.emit()
+        elif key == 'set_all':
+            self.set_all_clicked.emit()
+
+    def set_button_enabled(self, key: str, enabled: bool):
+        """由父窗口调用以设置某个按钮的启用状态。"""
+        btn = self.buttons.get(key)
+        if btn:
+            btn.setEnabled(bool(enabled))
+
+    def _apply_style(self):
+        parent = self.parent()
+        if parent and hasattr(parent, '_style_manager'):
+            parent._style_manager.apply_to_widget(self)
+        else:
+            self.setStyleSheet("""
+                QFrame {
+                    background-color: transparent;
+                    border: none;
+                }
+                QLabel {
+                    color: #1C1C1E;
+                    font-size: 12px;
+                    background-color: transparent;
+                }
+                QPushButton {
+                    padding: 5px 8px;
+                    font-size: 11px;
+                    background-color: #F5F5F7;
+                    color: #1C1C1E;
+                    border: 1px solid #D1D1D6;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #0A84FF;
+                    color: white;
+                }
+                QPushButton:disabled {
+                    background-color: #555;
+                    color: #888;
+                }
+            """)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_start = event.pos()
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self.parent():
+            new_pos = self.pos() + event.pos() - self._drag_start
+            max_x = self.parent().width() - self.width()
+            max_y = self.parent().height() - self.height()
+            new_pos.setX(max(0, min(new_pos.x(), max_x)))
+            new_pos.setY(max(0, min(new_pos.y(), max_y)))
+            self.move(new_pos)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+
+
+class FloatingToolbarSettingsDialog(QDialog):
+    """悬浮工具栏设置对话框"""
+    def __init__(self, current_settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("悬浮工具栏设置")
+        self.resize(350, 400)
+        self._settings = dict(current_settings)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        self.visible_cb = QCheckBox("显示悬浮工具栏")
+        self.visible_cb.setChecked(self._settings.get('visible', True))
+        layout.addWidget(self.visible_cb)
+
+        layout.addSpacing(10)
+
+        orient_group = QGroupBox("排列方向")
+        orient_layout = QHBoxLayout(orient_group)
+        self.vert_radio = QRadioButton("竖向排列")
+        self.horiz_radio = QRadioButton("横向排列")
+        orient_layout.addWidget(self.vert_radio)
+        orient_layout.addWidget(self.horiz_radio)
+        orient_layout.addStretch()
+
+        if self._settings.get('orientation', 'vertical') == 'vertical':
+            self.vert_radio.setChecked(True)
+        else:
+            self.horiz_radio.setChecked(True)
+        layout.addWidget(orient_group)
+
+        layout.addSpacing(10)
+
+        btn_group = QGroupBox("显示按钮（勾选要显示的按钮）")
+        btn_layout = QVBoxLayout(btn_group)
+        self.btn_checks = {}
+        visibility = self._settings.get('button_visibility', {})
+        for key, config in FloatingToolbar.BUTTON_CONFIG.items():
+            cb = QCheckBox(config['text'] + " - " + config['tooltip'])
+            cb.setChecked(visibility.get(key, True))
+            btn_layout.addWidget(cb)
+            self.btn_checks[key] = cb
+        layout.addWidget(btn_group)
+
+        layout.addStretch()
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addWidget(ok_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+
+    def get_settings(self):
+        return {
+            'visible': self.visible_cb.isChecked(),
+            'orientation': 'vertical' if self.vert_radio.isChecked() else 'horizontal',
+            'button_visibility': {
+                key: cb.isChecked() for key, cb in self.btn_checks.items()
+            },
+            'position': self._settings.get('position', {'x': 10, 'y': 70}),
+        }
+
+
+class StyleSettingsDialog(QDialog):
+    """风格设置对话框 - 支持深色/浅色/跟随系统主题"""
+    def __init__(self, current_style, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("界面风格设置")
+        self.resize(400, 350)
+        self._style = dict(current_style)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        theme_group = QGroupBox("主题模式")
+        theme_layout = QVBoxLayout(theme_group)
+        self.dark_radio = QRadioButton("深色模式")
+        self.light_radio = QRadioButton("浅色模式")
+        self.system_radio = QRadioButton("跟随系统")
+        theme_layout.addWidget(self.dark_radio)
+        theme_layout.addWidget(self.light_radio)
+        theme_layout.addWidget(self.system_radio)
+
+        theme = self._style.get('theme', 'dark')
+        if theme == 'light':
+            self.light_radio.setChecked(True)
+        elif theme == 'system':
+            self.system_radio.setChecked(True)
+        else:
+            self.dark_radio.setChecked(True)
+        layout.addWidget(theme_group)
+
+        layout.addSpacing(10)
+
+        accent_group = QGroupBox("强调色")
+        accent_layout = QHBoxLayout(accent_group)
+        self.accent_combo = QComboBox()
+        accent_colors = [
+            ('#0A84FF', '蓝色 (默认)'),
+            ('#30D158', '绿色'),
+            ('#FF9500', '橙色'),
+            ('#FF3B30', '红色'),
+            ('#AF52DE', '紫色'),
+            ('#FF2D55', '粉红'),
+        ]
+        for val, name in accent_colors:
+            self.accent_combo.addItem(name, val)
+        current_accent = self._style.get('accent_color', '#0A84FF')
+        idx = self.accent_combo.findData(current_accent)
+        if idx >= 0:
+            self.accent_combo.setCurrentIndex(idx)
+        accent_layout.addWidget(QLabel("选择强调色:"))
+        accent_layout.addWidget(self.accent_combo, 1)
+        layout.addWidget(accent_group)
+
+        layout.addSpacing(10)
+
+        radius_group = QGroupBox("界面圆角")
+        radius_layout = QHBoxLayout(radius_group)
+        self.radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self.radius_slider.setRange(0, 20)
+        self.radius_slider.setValue(self._style.get('border_radius', 8))
+        self.radius_label = QLabel(f"{self.radius_slider.value()}px")
+        self.radius_slider.valueChanged.connect(lambda v: self.radius_label.setText(f"{v}px"))
+        radius_layout.addWidget(self.radius_slider)
+        radius_layout.addWidget(self.radius_label)
+        layout.addWidget(radius_group)
+
+        layout.addStretch()
+
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addWidget(ok_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+
+    def get_style(self):
+        theme = 'dark'
+        if self.light_radio.isChecked():
+            theme = 'light'
+        elif self.system_radio.isChecked():
+            theme = 'system'
+        return {
+            'theme': theme,
+            'accent_color': self.accent_combo.currentData(),
+            'border_radius': self.radius_slider.value(),
+        }
+
+
+class StyleManager:
+    """管理器风格管理器 - 支持深色/浅色/跟随系统主题"""
+
+    THEMES = {
+        'dark': {
+            'window_bg': '#1C1C1E',
+            'panel_bg': '#2C2C2E',
+            'card_bg': '#3A3A3C',
+            'text_primary': '#FFFFFF',
+            'text_secondary': '#8E8E93',
+            'border': '#48484A',
+            'button_bg': '#3A3A3C',
+            'button_hover': '#0A84FF',
+            'input_bg': '#2C2C2E',
+        },
+        'light': {
+            'window_bg': '#F5F5F7',
+            'panel_bg': '#FFFFFF',
+            'card_bg': '#FFFFFF',
+            'text_primary': '#1C1C1E',
+            'text_secondary': '#8E8E93',
+            'border': '#D1D1D6',
+            'button_bg': '#007AFF',
+            'button_hover': '#0056CC',
+            'input_bg': '#FFFFFF',
+        },
+    }
+
+    def __init__(self, app=None, style_config=None):
+        self.app = app
+        self._config = style_config or {'theme': 'light', 'accent_color': '#007AFF', 'border_radius': 8}
+        self._current_theme = self._config.get('theme', 'light')
+        self._accent = self._config.get('accent_color', '#0A84FF')
+        self._radius = self._config.get('border_radius', 8)
+
+    def update_config(self, config):
+        self._config = config
+        self._current_theme = config.get('theme', 'dark')
+        self._accent = config.get('accent_color', '#0A84FF')
+        self._radius = config.get('border_radius', 8)
+        if self.app:
+            self.apply_to_application()
+
+    def get_current_colors(self):
+        theme = self._current_theme
+        if theme == 'system':
+            import platform
+            if platform.system() == 'Windows':
+                try:
+                    import winreg
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+                        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                        theme = 'light' if value == 1 else 'dark'
+                except:
+                    theme = 'dark'
+            else:
+                theme = 'dark'
+        return self.THEMES.get(theme, self.THEMES['dark'])
+
+    def apply_to_application(self):
+        if not self.app:
+            return
+
+        # 关键修复：清理样式缓存，避免dangling widget指针崩溃 (QTBUG-11658)
+        # 在setStyleSheet之前必须unpolish，否则已销毁widget的缓存会导致SIGSEGV
+        if hasattr(self.app, 'style') and self.app.style():
+            try:
+                self.app.style().unpolish(self.app)
+            except:
+                pass
+
+        colors = self.get_current_colors()
+        is_dark = self._current_theme in ('dark', 'system')
+
+        if is_dark:
+            self.app.setStyleSheet(f"""
+                QMainWindow {{
+                    background-color: {colors['window_bg']};
+                }}
+                QGroupBox {{
+                    font-weight: bold;
+                    border: 1px solid {colors['border']};
+                    border-radius: {self._radius}px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                    color: {colors['text_primary']};
+                }}
+                QGroupBox::title {{
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 5px;
+                    color: {colors['text_primary']};
+                }}
+                QLabel {{
+                    color: {colors['text_primary']};
+                }}
+                # QPushButton {{
+                #     border-radius: {self._radius}px;
+                # }}
+                QLineEdit {{
+                    background-color: {colors['input_bg']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    color: {colors['text_primary']};
+                    padding: 5px;
+                }}
+                QListWidget {{
+                    background-color: {colors['panel_bg']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    color: {colors['text_primary']};
+                }}
+                QTableWidget {{
+                    background-color: {colors['panel_bg']};
+                    color: {colors['text_primary']};
+                }}
+                QHeaderView::section {{
+                    background-color: {colors['card_bg']};
+                    color: {colors['text_primary']};
+                    border: 1px solid {colors['border']};
+                }}
+                QComboBox {{
+                    background-color: {colors['input_bg']};
+                    color: {colors['text_primary']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    padding: 4px;
+                }}
+                QSlider::groove:horizontal {{
+                    border: 1px solid {colors['border']};
+                    height: 6px;
+                    background: {colors['card_bg']};
+                    border-radius: 3px;
+                }}
+                QSlider::handle:horizontal {{
+                    background: {self._accent};
+                    width: 14px;
+                    border-radius: 7px;
+                }}
+                QCheckBox {{
+                    color: {colors['text_primary']};
+                }}
+                QRadioButton {{
+                    color: {colors['text_primary']};
+                }}
+                QScrollArea {{
+                    border: none;
+                    background: transparent;
+                }}
+                QTextEdit {{
+                    background-color: {colors['input_bg']};
+                    color: {colors['text_primary']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                }}
+            """)
+        else:
+            self.app.setStyleSheet(f"""
+                QMainWindow {{
+                    background-color: {colors['window_bg']};
+                }}
+                QGroupBox {{
+                    font-weight: bold;
+                    border: 1px solid {colors['border']};
+                    border-radius: {self._radius}px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                    color: {colors['text_primary']};
+                }}
+                QGroupBox::title {{
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 5px;
+                    color: {colors['text_primary']};
+                }}
+                QLabel {{
+                    color: {colors['text_primary']};
+                }}
+                # QPushButton {{
+                #     border-radius: {self._radius}px;
+                # }}
+                QLineEdit {{
+                    background-color: {colors['input_bg']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    color: {colors['text_primary']};
+                    padding: 5px;
+                }}
+                QListWidget {{
+                    background-color: {colors['panel_bg']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    color: {colors['text_primary']};
+                }}
+                QTableWidget {{
+                    background-color: {colors['panel_bg']};
+                    color: {colors['text_primary']};
+                }}
+                QHeaderView::section {{
+                    background-color: {colors['card_bg']};
+                    color: {colors['text_primary']};
+                    border: 1px solid {colors['border']};
+                }}
+                QComboBox {{
+                    background-color: {colors['input_bg']};
+                    color: {colors['text_primary']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                    padding: 4px;
+                }}
+                QSlider::groove:horizontal {{
+                    border: 1px solid {colors['border']};
+                    height: 6px;
+                    background: {colors['card_bg']};
+                    border-radius: 3px;
+                }}
+                QSlider::handle:horizontal {{
+                    background: {self._accent};
+                    width: 14px;
+                    border-radius: 7px;
+                }}
+                QCheckBox {{
+                    color: {colors['text_primary']};
+                }}
+                QRadioButton {{
+                    color: {colors['text_primary']};
+                }}
+                QScrollArea {{
+                    border: none;
+                    background: transparent;
+                }}
+                QTextEdit {{
+                    background-color: {colors['input_bg']};
+                    color: {colors['text_primary']};
+                    border: 1px solid {colors['border']};
+                    border-radius: 4px;
+                }}
+            """)
+
+        palette = self.app.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(colors['window_bg']))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(colors['text_primary']))
+        palette.setColor(QPalette.ColorRole.Base, QColor(colors['panel_bg']))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(colors['card_bg']))
+        palette.setColor(QPalette.ColorRole.Text, QColor(colors['text_primary']))
+        palette.setColor(QPalette.ColorRole.Button, QColor(colors['button_bg']))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(colors['text_primary']))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(self._accent))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor('#FFFFFF'))
+        self.app.setPalette(palette)
+
+        # 直接应用样式表和调色板（已在前面调用 setStyleSheet）
+        # 注意：已在 setStyleSheet 之前尝试 unpolish 应用，避免未销毁 widget 导致的内部崩溃
+
+        
+
+    def apply_to_widget(self, widget):
+        colors = self.get_current_colors()
+        is_dark = self._current_theme in ('dark', 'system')
+
+        if isinstance(widget, QFrame):
+            if is_dark:
+                widget.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: rgba(28, 28, 30, 0.92);
+                        border: 1px solid {colors['border']};
+                        border-radius: {self._radius}px;
+                    }}
+                    QLabel {{
+                        color: {colors['text_primary']};
+                        font-size: 12px;
+                    }}
+                    QPushButton {{
+                        padding: 5px 8px;
+                        font-size: 11px;
+                        background-color: {colors['card_bg']};
+                        color: {colors['text_primary']};
+                        border: none;
+                        border-radius: 4px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {self._accent};
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #555;
+                        color: #888;
+                    }}
+                """)
+            else:
+                widget.setStyleSheet(f"""
+                    QFrame {{
+                        background-color: rgba(255, 255, 255, 0.95);
+                        border: 1px solid {colors['border']};
+                        border-radius: {self._radius}px;
+                    }}
+                    QLabel {{
+                        color: {colors['text_primary']};
+                        font-size: 12px;
+                    }}
+                    QPushButton {{
+                        padding: 5px 8px;
+                        font-size: 11px;
+                        background-color: {colors['card_bg']};
+                        color: {colors['text_primary']};
+                        border: 1px solid {colors['border']};
+                        border-radius: 4px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: {self._accent};
+                        color: white;
+                    }}
+                    QPushButton:disabled {{
+                        background-color: #CCC;
+                        color: #888;
+                    }}
+                """)
+
 
 class PanoramaManager(QMainWindow):
     # 方向更新信号（从HTTP服务器线程传递到主线程）
@@ -1652,6 +2424,20 @@ class PanoramaManager(QMainWindow):
         self.project_data: Optional[Project] = None
         self.server_thread: Optional[HttpServerThread] = None
         self.current_floor_id: Optional[str] = None
+        
+        # 快捷键配置
+        self._shortcuts = self._load_shortcuts()
+        # 风格管理器
+        self._style_config = self._load_style_config()
+        self._style_manager = StyleManager(None, self._style_config)
+        # 悬浮工具栏设置
+        self._toolbar_settings = self._load_toolbar_settings()
+
+        # 撤销/重做栈
+        self._undo_stack: List[dict] = []
+        self._redo_stack: List[dict] = []
+        # 上一个命令记录（空格重复用）
+        self._last_command = None
         
         self._init_ui()
         self._init_menu()
@@ -1707,6 +2493,19 @@ class PanoramaManager(QMainWindow):
         self.canvas.marker_context_menu.connect(self._on_marker_context_menu)
         self.canvas.marker_double_clicked.connect(self._on_marker_double_clicked)
         left_layout.addWidget(self.canvas)
+        
+        # 悬浮快捷按钮栏（使用信号转发，避免按钮重建时丢失连接）
+        self.floating_toolbar = FloatingToolbar(left_panel, self._toolbar_settings)
+        # 连接到 FloatingToolbar 的转发信号（稳定，不随按钮重建而变化）
+        self.floating_toolbar.relink_clicked.connect(
+            lambda: self._relink_marker_photo(self.current_marker.id) if hasattr(self, 'current_marker') and self.current_marker else None
+        )
+        self.floating_toolbar.delete_clicked.connect(self._delete_current_marker)
+        self.floating_toolbar.sector_clicked.connect(self._toggle_sector)
+        self.floating_toolbar.adjust_clicked.connect(
+            lambda: self._toggle_adjust_mode(self.current_marker.id) if hasattr(self, 'current_marker') and self.current_marker else None
+        )
+        self.floating_toolbar.set_all_clicked.connect(self._set_all_sectors_direction)
         
         # 画布操作提示
         self.canvas_hint = QLabel("💡 左键拖动点位移动 | 右键点击点位弹出菜单 | 滚轮缩放 | 左键拖拽空白处平移")
@@ -2284,6 +3083,362 @@ class PanoramaManager(QMainWindow):
         os.makedirs(history_dir, exist_ok=True)
         return os.path.join(history_dir, 'history.json')
     
+    # -------------------------------------------------------------------------
+    # 快捷键配置
+    # -------------------------------------------------------------------------
+    
+    def _default_shortcuts(self) -> dict:
+        return {
+            'delete': 'Delete',
+            'undo': 'Ctrl+Z',
+            'redo': 'Ctrl+Y',
+            'repeat': 'Space',
+            'relink': '',
+            'toggle_sector': '',
+            'adjust_mode': '',
+            'set_all_direction': '',
+            'align_panorama': '',
+            'rotate_left': '',
+            'rotate_right': '',
+        }
+    
+    def _get_shortcuts_file(self) -> str:
+        history_dir = os.path.join(os.path.expanduser('~'), '.panorama_manager')
+        os.makedirs(history_dir, exist_ok=True)
+        return os.path.join(history_dir, 'shortcuts.json')
+    
+    def _load_shortcuts(self) -> dict:
+        path = self._get_shortcuts_file()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                defaults = self._default_shortcuts()
+                defaults.update(loaded)
+                return defaults
+            except Exception as e:
+                print(f"[警告] 加载快捷键配置失败: {e}")
+        return self._default_shortcuts()
+    
+    def _save_shortcuts(self):
+        path = self._get_shortcuts_file()
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self._shortcuts, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[警告] 保存快捷键配置失败: {e}")
+    
+    def _show_shortcut_settings(self):
+        dialog = ShortcutDialog(self._shortcuts, self)
+        if dialog.exec():
+            self._shortcuts = dialog.get_shortcuts()
+            self._save_shortcuts()
+            QMessageBox.information(self, "保存成功", "快捷键设置已保存，下次启动自动生效")
+    
+    def _export_shortcuts(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出快捷键配置", "shortcuts.json", "JSON (*.json)")
+        if path:
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    json.dump(self._shortcuts, f, ensure_ascii=False, indent=2)
+                QMessageBox.information(self, "成功", f"已导出到:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导出失败: {e}")
+    
+    def _import_shortcuts(self):
+        path, _ = QFileDialog.getOpenFileName(self, "导入快捷键配置", "", "JSON (*.json)")
+        if path:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                for k in self._shortcuts:
+                    if k in loaded:
+                        self._shortcuts[k] = loaded[k]
+                self._save_shortcuts()
+                QMessageBox.information(self, "成功", "快捷键配置已导入并保存")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导入失败: {e}")
+    
+    def _match_shortcut(self, event, shortcut_str: str) -> bool:
+        if not shortcut_str:
+            return False
+        parts = [p.strip().lower() for p in shortcut_str.split('+')]
+        mods = Qt.KeyboardModifier.NoModifier
+        key_name = None
+        for p in parts:
+            if p == 'ctrl':
+                mods |= Qt.KeyboardModifier.ControlModifier
+            elif p == 'shift':
+                mods |= Qt.KeyboardModifier.ShiftModifier
+            elif p == 'alt':
+                mods |= Qt.KeyboardModifier.AltModifier
+            elif p == 'meta':
+                mods |= Qt.KeyboardModifier.MetaModifier
+            else:
+                key_name = p
+        if not key_name:
+            return False
+        key_map = {
+            'space': Qt.Key.Key_Space,
+            'delete': Qt.Key.Key_Delete,
+            'return': Qt.Key.Key_Return,
+            'enter': Qt.Key.Key_Enter,
+            'esc': Qt.Key.Key_Escape,
+            'tab': Qt.Key.Key_Tab,
+            'backspace': Qt.Key.Key_Backspace,
+            'up': Qt.Key.Key_Up,
+            'down': Qt.Key.Key_Down,
+            'left': Qt.Key.Key_Left,
+            'right': Qt.Key.Key_Right,
+            'home': Qt.Key.Key_Home,
+            'end': Qt.Key.Key_End,
+            'pageup': Qt.Key.Key_PageUp,
+            'pagedown': Qt.Key.Key_PageDown,
+            'insert': Qt.Key.Key_Insert,
+        }
+        if key_name in key_map:
+            target_key = key_map[key_name]
+        else:
+            attr_name = f'Key_{key_name[0].upper()}{key_name[1:]}' if len(key_name) > 1 else f'Key_{key_name.upper()}'
+            target_key = getattr(Qt.Key, attr_name, None)
+            if target_key is None:
+                return False
+        return event.key() == target_key and event.modifiers() == mods
+    
+    # -------------------------------------------------------------------------
+    # 撤销 / 重做 / 命令重复
+    # -------------------------------------------------------------------------
+    
+    def _push_history(self):
+        """保存当前项目状态到撤销栈"""
+        if not self.project_data:
+            return
+        import copy
+        state = copy.deepcopy(self.project_data.to_dict())
+        self._undo_stack.append(state)
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+    
+    def _undo(self):
+        """撤销上一次编辑"""
+        if not self._undo_stack or not self.project_data:
+            return
+        import copy
+        current_state = copy.deepcopy(self.project_data.to_dict())
+        self._redo_stack.append(current_state)
+        prev_state = self._undo_stack.pop()
+        self.project_data = Project.from_dict(prev_state)
+        self._save_project()
+        self._refresh_markers()
+        self.import_status_label.setText("↩️ 已撤销")
+        self.canvas.clear_hover()
+    
+    def _redo(self):
+        """重做上一次撤销"""
+        if not self._redo_stack or not self.project_data:
+            return
+        import copy
+        current_state = copy.deepcopy(self.project_data.to_dict())
+        self._undo_stack.append(current_state)
+        next_state = self._redo_stack.pop()
+        self.project_data = Project.from_dict(next_state)
+        self._save_project()
+        self._refresh_markers()
+        self.import_status_label.setText("↪️ 已重做")
+        self.canvas.clear_hover()
+    
+    def _record_command(self, name: str, *args, **kwargs):
+        """记录上一个可重复命令"""
+        self._last_command = (name, args, kwargs)
+    
+    def _repeat_last_command(self):
+        """空格重复上一个命令"""
+        if not self._last_command:
+            return
+        name, args, kwargs = self._last_command
+        if name == '_delete_current_marker':
+            self._delete_current_marker()
+        elif name == '_delete_marker' and args:
+            self._delete_marker(args[0])
+        elif name == '_relink_marker_photo':
+            if hasattr(self, 'current_marker') and self.current_marker:
+                self._relink_marker_photo(self.current_marker.id)
+        elif name == '_toggle_sector':
+            self._toggle_sector()
+        elif name == '_toggle_adjust_mode':
+            if hasattr(self, 'current_marker') and self.current_marker:
+                self._toggle_adjust_mode(self.current_marker.id)
+        elif name == '_set_all_sectors_direction':
+            self._set_all_sectors_direction()
+        elif name == '_rotate_sector' and args:
+            self._rotate_sector(args[0])
+        elif name == '_align_to_panorama':
+            self._align_to_panorama()
+        elif name == '_link_photo_to_marker' and len(args) >= 2:
+            self._link_photo_to_marker(args[0], args[1])
+        elif name == '_update_marker_name':
+            self._update_marker_name()
+        elif name == '_on_marker_add_requested' and len(args) >= 2:
+            self._on_marker_add_requested(args[0], args[1])
+    
+    def _update_floating_toolbar(self):
+        """更新悬浮按钮状态"""
+        has_marker = hasattr(self, 'current_marker') and self.current_marker is not None
+        if 'relink' in self.floating_toolbar.buttons:
+            self.floating_toolbar.buttons['relink'].setEnabled(has_marker)
+        if 'delete' in self.floating_toolbar.buttons:
+            self.floating_toolbar.buttons['delete'].setEnabled(has_marker)
+        if 'adjust' in self.floating_toolbar.buttons:
+            self.floating_toolbar.buttons['adjust'].setEnabled(has_marker)
+
+    # -------------------------------------------------------------------------
+    # 悬浮工具栏设置
+    # -------------------------------------------------------------------------
+
+    def _get_toolbar_settings_file(self) -> str:
+        history_dir = os.path.join(os.path.expanduser('~'), '.panorama_manager')
+        os.makedirs(history_dir, exist_ok=True)
+        return os.path.join(history_dir, 'toolbar_settings.json')
+
+    def _load_toolbar_settings(self) -> dict:
+        path = self._get_toolbar_settings_file()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[警告] 加载工具栏设置失败: {e}")
+        return FloatingToolbar._default_settings(FloatingToolbar)
+
+    def _save_toolbar_settings(self):
+        path = self._get_toolbar_settings_file()
+        try:
+            settings = self.floating_toolbar.get_settings()
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[警告] 保存工具栏设置失败: {e}")
+
+    def _show_toolbar_settings(self):
+        dialog = FloatingToolbarSettingsDialog(self._toolbar_settings, self)
+        if dialog.exec():
+            self._toolbar_settings = dialog.get_settings()
+            self.floating_toolbar.update_settings(self._toolbar_settings)
+            self._save_toolbar_settings()
+            QMessageBox.information(self, "保存成功", "悬浮工具栏设置已保存")
+
+    # -------------------------------------------------------------------------
+    # 风格设置
+    # -------------------------------------------------------------------------
+
+    def _get_style_config_file(self) -> str:
+        history_dir = os.path.join(os.path.expanduser('~'), '.panorama_manager')
+        os.makedirs(history_dir, exist_ok=True)
+        return os.path.join(history_dir, 'style_config.json')
+
+    def _load_style_config(self) -> dict:
+        path = self._get_style_config_file()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"[警告] 加载风格配置失败: {e}")
+        return {'theme': 'light', 'accent_color': '#007AFF', 'border_radius': 8}
+
+    def _save_style_config(self):
+        path = self._get_style_config_file()
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self._style_config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[警告] 保存风格配置失败: {e}")
+
+    def _show_style_settings(self):
+        dialog = StyleSettingsDialog(self._style_config, self)
+        if dialog.exec(): 
+            self._style_config = dialog.get_style()
+            self._style_manager.update_config(self._style_config)
+            # 应用风格到应用
+            app = QApplication.instance()
+            if app:
+                self._style_manager.app = app
+                self._style_manager.apply_to_application()
+            self._save_style_config()
+            QMessageBox.information(self, "保存成功", "风格设置已保存，部分更改需要重启后完全生效")
+
+    def _apply_current_style(self):
+        """应用当前风格到应用"""
+        app = QApplication.instance()
+        if app and self._style_manager:
+            self._style_manager.app = app
+            self._style_manager.apply_to_application()
+            # 重新应用悬浮工具栏风格
+            self.floating_toolbar._apply_style()
+    
+    # -------------------------------------------------------------------------
+    # 键盘事件
+    # -------------------------------------------------------------------------
+    
+    def keyPressEvent(self, event):
+        # 如果当前焦点在文本输入框，不拦截
+        focused = QApplication.instance().focusWidget()
+        if isinstance(focused, (QLineEdit, QTextEdit)):
+            super().keyPressEvent(event)
+            return
+        
+        shortcuts = self._shortcuts
+        
+        if self._match_shortcut(event, shortcuts.get('delete', 'Delete')):
+            self._delete_current_marker()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('undo', 'Ctrl+Z')):
+            self._undo()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('redo', 'Ctrl+Y')):
+            self._redo()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('repeat', 'Space')):
+            self._repeat_last_command()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('relink', '')):
+            if hasattr(self, 'current_marker') and self.current_marker:
+                self._relink_marker_photo(self.current_marker.id)
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('toggle_sector', '')):
+            self._toggle_sector()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('adjust_mode', '')):
+            if hasattr(self, 'current_marker') and self.current_marker:
+                self._toggle_adjust_mode(self.current_marker.id)
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('set_all_direction', '')):
+            self._set_all_sectors_direction()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('align_panorama', '')):
+            self._align_to_panorama()
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('rotate_left', '')):
+            self._rotate_sector(-15)
+            event.accept()
+            return
+        elif self._match_shortcut(event, shortcuts.get('rotate_right', '')):
+            self._rotate_sector(15)
+            event.accept()
+            return
+        
+        super().keyPressEvent(event)
+    
     def _load_history(self) -> List[dict]:
         """加载历史记录"""
         history_file = self._get_history_file()
@@ -2398,6 +3553,29 @@ class PanoramaManager(QMainWindow):
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
         
+        shortcut_action = QAction("快捷键设置(&K)...", self)
+        shortcut_action.setShortcut("Ctrl+K")
+        shortcut_action.triggered.connect(self._show_shortcut_settings)
+        tools_menu.addAction(shortcut_action)
+        
+        export_shortcut_action = QAction("导出快捷键配置(&E)...", self)
+        export_shortcut_action.triggered.connect(self._export_shortcuts)
+        tools_menu.addAction(export_shortcut_action)
+        
+        import_shortcut_action = QAction("导入快捷键配置(&M)...", self)
+        import_shortcut_action.triggered.connect(self._import_shortcuts)
+        tools_menu.addAction(import_shortcut_action)
+        
+        
+        tools_menu.addSeparator()
+
+        toolbar_settings_action = QAction("悬浮工具栏设置(&B)...", self)
+        toolbar_settings_action.triggered.connect(self._show_toolbar_settings)
+        tools_menu.addAction(toolbar_settings_action)
+
+        style_settings_action = QAction("界面风格设置(&S)...", self)
+        style_settings_action.triggered.connect(self._show_style_settings)
+        tools_menu.addAction(style_settings_action)
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
         
@@ -3416,6 +4594,7 @@ class PanoramaManager(QMainWindow):
             
             # 新增：更新对齐全景按钮状态
             self.align_panorama_btn.setEnabled(has_photo)
+            self._update_floating_toolbar()
     
     def _create_floor_tabs(self):
         """创建楼层切换标签"""
@@ -3505,9 +4684,9 @@ class PanoramaManager(QMainWindow):
             self.canvas.load_floorplan(floorplan_path)
             
             # 绘制该楼层的标记点
-            for marker_data in floor_data.get('markers', []):
+            for seq, marker_data in enumerate(floor_data.get('markers', []), start=1):
                 marker = Marker.from_dict(marker_data)
-                label = marker.customName or marker.id
+                label = str(seq)
                 self.canvas.add_marker(
                     marker.id, marker.x, marker.y, marker.status, label,
                     direction=getattr(marker, 'direction', None)
@@ -3519,6 +4698,8 @@ class PanoramaManager(QMainWindow):
     def _update_marker_name(self):
         """更新点位名称"""
         if hasattr(self, 'current_marker'):
+            self._push_history()
+            self._record_command('_update_marker_name')
             new_name = self.marker_custom_name.text()
             # 更新数据（在所有楼层中查找）
             for floor_data in self.project_data.floors:
@@ -3619,7 +4800,114 @@ class PanoramaManager(QMainWindow):
             traceback.print_exc()
     
     def _generate_viewer_html(self, viewer_dir: str):
-        """生成查看器 HTML 文件 - 支持多楼层"""
+        """生成查看器 HTML 文件 - 支持多楼层与完整漫游手动设置"""
+        # ========== 漫游热点计算 ==========
+        import math
+        roam_hotspots = {}  # {floor_id: {marker_id: [hotspot, ...]}}
+
+        for floor_data in sorted(self.project_data.floors, key=lambda f: f.get('order', 0), reverse=True):
+            floor_id = floor_data['id']
+            markers = floor_data.get('markers', [])
+            roam_hotspots[floor_id] = {}
+
+            # 只处理已关联且有照片的采集点
+            linked_markers = [m for m in markers if m.get('status') == 'linked' and m.get('panoramaPath')]
+
+            # 计算该楼层的最大距离（用于透视归一化）
+            max_floor_distance = 0.0
+            for i, m1 in enumerate(linked_markers):
+                for m2 in linked_markers[i+1:]:
+                    dx = m1.get('x', 0) - m2.get('x', 0)
+                    dy = m1.get('y', 0) - m2.get('y', 0)
+                    d = math.sqrt(dx*dx + dy*dy)
+                    if d > max_floor_distance:
+                        max_floor_distance = d
+            # 兜底：避免除零
+            if max_floor_distance < 0.001:
+                max_floor_distance = 1.0
+
+            for current in linked_markers:
+                current_id = current['id']
+                current_x = current.get('x', 0)
+                current_y = current.get('y', 0)
+                current_dir = current.get('direction', -90.0)
+                if current_dir is None:
+                    current_dir = -90.0
+
+                hotspots = []
+
+                for target in linked_markers:
+                    if target['id'] == current_id:
+                        continue  # 跳过自己
+
+                    target_x = target.get('x', 0)
+                    target_y = target.get('y', 0)
+
+                    # 计算平面相对向量
+                    dx = target_x - current_x
+                    dy = target_y - current_y
+
+                    # 平面距离（归一化坐标 0-1范围）
+                    distance = math.sqrt(dx * dx + dy * dy)
+                    if distance < 0.001:
+                        continue  # 重合点跳过
+
+                    # === 修正后的方位角计算（图像Y向下，翻转后Y轴为北） ===
+                    # 地理方位角：从北顺时针，0=北，90=东，180=南，270=西
+                    # atan2(dx, dy) 因为 Y 正方向为北
+                    azimuth_rad = math.atan2(dx, -dy)  # 图像Y向下，翻转得到正确方位角
+                    azimuth = math.degrees(azimuth_rad)
+                    if azimuth < 0:
+                        azimuth += 360
+
+                    # 当前朝向：direction=-90(上/北) → heading=0(北)
+                    # direction=0(右/东) → heading=90(东)
+                    heading = (current_dir + 90) % 360
+
+                    # 相对全景角度：目标方位角 - 当前朝向
+                    relative_yaw = azimuth - heading
+
+                    # 标准化到 [-180, 180]
+                    while relative_yaw > 180:
+                        relative_yaw -= 360
+                    while relative_yaw < -180:
+                        relative_yaw += 360
+
+                    # 前方/身后判断：|yaw| > 120° 视为身后
+                    is_behind = abs(relative_yaw) > 120
+
+                    # === 透视比例：0=当前点（脚下），1=最远点（灭点） ===
+                    perspective_ratio = min(1.0, distance / max_floor_distance)
+
+                    # 身后点额外增加透视距离感
+                    if is_behind:
+                        perspective_ratio = min(1.0, perspective_ratio * 1.3)
+
+                    target_name = target.get('customName') if target.get('customName') else target.get('id', '')
+
+                    hotspots.append({
+                        'targetId': target['id'],
+                        'targetName': target_name,
+                        'yaw': round(relative_yaw, 2),
+                        # pitch 由前端根据 vanishingPointPitch 配置实时计算
+                        # 公式: pitch = -85 + perspectiveRatio * (vanishingPointPitch + 85)
+                        'distance': round(distance, 4),
+                        # 透视比例：0=最近，1=最远
+                        'perspectiveRatio': round(perspective_ratio, 4),
+                        'isBehind': is_behind,
+                        'maxDistance': round(max_floor_distance, 4)
+                    })
+
+                # 按透视比例排序（近的优先显示）
+                hotspots.sort(key=lambda h: h['perspectiveRatio'])
+                roam_hotspots[floor_id][current_id] = hotspots
+
+        # 漫游热点数据已嵌入每个 marker 的 roamHotSpots 字段
+        total_hs = sum(len(v) for d in roam_hotspots.values() for v in d.values())
+        print(f"[调试] 漫游热点计算完成，共 {total_hs} 个热点关系")
+
+        project_name = self.project_data.projectName
+
         # 构建多楼层数据
         floors_js = []
         # 按 order 排序楼层（从高到低，与PC端保持一致）
@@ -3634,12 +4922,33 @@ class PanoramaManager(QMainWindow):
             # 收集该楼层所有标记点（不限制状态，让查看器显示所有点位）
             photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
             all_markers = []
+            # 为该楼层计算漫游热点（每个已关联点指向其他已关联点）
+            floor_linked_markers = [m for m in floor_data.get('markers', []) 
+                                     if m.get('status') == 'linked' and m.get('panoramaPath')]
+
             for m in floor_data.get('markers', []):
                 marker_copy = dict(m)
                 # 只有已关联的才需要处理 panoramaPath
                 if m.get('status') == 'linked' and m.get('panoramaPath'):
                     if photo_base_dir and os.path.exists(photo_base_dir):
                         marker_copy['panoramaPath'] = self._resolve_marker_panorama_path(marker_copy, photo_base_dir)
+                    # 附加漫游热点数据：同楼层其他已关联点
+                    current_id = m['id']
+                    hs_list = roam_hotspots.get(floor_id, {}).get(current_id, [])
+                    # 简化数据，保留前端需要的字段 + 照片数量（用于时空环层数）
+                    marker_copy['roamHotSpots'] = [
+                        {
+                            'targetId': h['targetId'],
+                            'targetName': h['targetName'],
+                            'yaw': h['yaw'],
+                            'distance': h['distance'],
+                            'isBehind': h['isBehind'],
+                            'perspectiveRatio': h.get('perspectiveRatio', 0),
+                            # 时空转换点：目标点位的照片数量决定环层数
+                            'photoCount': len(target.get('photos', [])) or (1 if target.get('panoramaPath') else 0)
+                        }
+                        for h in hs_list
+                    ]
                 all_markers.append(marker_copy)
             
             # 只要有平面图或标记点就加入楼层
@@ -3652,10 +4961,9 @@ class PanoramaManager(QMainWindow):
                 })
         
         floors_json = json.dumps(floors_js, ensure_ascii=False)
-        project_name = self.project_data.projectName
-        
-        print(f"[调试] 生成网页 - 楼层数: {len(floors_js)}, 数据预览: {floors_json[:200]}...")
-        
+        print(f"[调试] 生成网页 - 楼层数: {len(floors_js)}")
+
+        # ========== HTML 内容 - 完整漫游手动设置版本 ==========
         html_content = '''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3668,392 +4976,213 @@ class PanoramaManager(QMainWindow):
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
-        
         .container { display: flex; height: 100vh; }
-        
-        /* 左侧面板 - 平面图 */
-        .floorplan-panel { 
-            width: 35%; 
-            background: #1C1C1E;
-            display: flex;
-            flex-direction: column;
-            border-right: 1px solid #333;
-        }
-        
-        .floor-tabs {
-            display: flex;
-            overflow-x: auto;
-            background: #2C2C2E;
-            padding: 8px;
-            gap: 8px;
-        }
+        .floorplan-panel { width: 35%; background: #1C1C1E; display: flex; flex-direction: column; border-right: 1px solid #333; }
+        .floor-tabs { display: flex; overflow-x: auto; background: #2C2C2E; padding: 8px; gap: 8px; }
         .floor-tabs::-webkit-scrollbar { display: none; }
-        
-        .floor-tab {
-            padding: 8px 16px;
-            background: #3A3A3C;
-            color: #999;
-            border: none;
-            border-radius: 16px;
-            cursor: pointer;
-            white-space: nowrap;
-            font-size: 13px;
-        }
-        .floor-tab.active {
-            background: #0A84FF;
-            color: white;
-        }
-        
-        .floorplan-container {
-            flex: 1;
-            position: relative;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .floorplan-wrapper {
-            position: relative;
-            width: 95%;
-            height: 95%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-            touch-action: none;
-            cursor: grab;
-        }
-        
-        .floorplan-wrapper:active {
-            cursor: grabbing;
-        }
-        
-        .floorplan-wrapper img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            transform-origin: 0 0;
-            transition: transform 0.1s ease-out;
-            user-select: none;
-            -webkit-user-drag: none;
-        }
-        
-        .floorplan-wrapper.zooming img {
-            transition: none;
-        }
-        
-        .zoom-controls {
-            position: absolute;
-            bottom: 20px;
-            right: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            z-index: 100;
-        }
-        
-        .zoom-btn {
-            width: 44px;
-            height: 44px;
-            border-radius: 50%;
-            border: none;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            font-size: 24px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            backdrop-filter: blur(10px);
-            transition: background 0.2s;
-        }
-        
-        .zoom-btn:hover {
-            background: rgba(0,0,0,0.9);
-        }
-        
-        .zoom-btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        .zoom-reset {
-            font-size: 13px;
-            width: auto;
-            padding: 0 16px;
-            border-radius: 22px;
-        }
-        
-        .marker-dot {
-            position: absolute;
-            width: 24px;
-            height: 24px;
-            border-radius: 50%;
-            transform: translate(-50%, -50%);
-            cursor: pointer;
-            border: 3px solid white;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.5);
-            background: #30D158;
-            transition: transform 0.2s;
-        }
+        .floor-tab { padding: 8px 16px; background: #3A3A3C; color: #999; border: none; border-radius: 16px; cursor: pointer; white-space: nowrap; font-size: 13px; }
+        .floor-tab.active { background: #0A84FF; color: white; }
+        .floorplan-container { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+        .floorplan-wrapper { position: relative; width: 95%; height: 95%; display: flex; align-items: center; justify-content: center; overflow: hidden; touch-action: none; cursor: grab; }
+        .floorplan-wrapper:active { cursor: grabbing; }
+        .floorplan-wrapper img { max-width: 100%; max-height: 100%; object-fit: contain; transform-origin: 0 0; transition: transform 0.1s ease-out; user-select: none; -webkit-user-drag: none; }
+        .floorplan-wrapper.zooming img { transition: none; }
+        .zoom-controls { position: absolute; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
+        .zoom-btn { width: 44px; height: 44px; border-radius: 50%; border: none; background: rgba(0,0,0,0.7); color: white; font-size: 24px; cursor: pointer; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(10px); transition: background 0.2s; }
+        .zoom-btn:hover { background: rgba(0,0,0,0.9); }
+        .zoom-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .zoom-reset { font-size: 13px; width: auto; padding: 0 16px; border-radius: 22px; }
+        .marker-dot { position: absolute; width: 24px; height: 24px; border-radius: 50%; transform: translate(-50%, -50%); cursor: pointer; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.5); background: #30D158; transition: transform 0.2s; }
         .marker-dot:hover { transform: translate(-50%, -50%) scale(1.2); }
-        .marker-dot.active {
-            background: #FFCC00;
-            animation: pulse 1.5s infinite;
-        }
+        .marker-dot.active { background: #FFCC00; animation: pulse 1.5s infinite; }
         .marker-dot.pending { background: #FF3B30; }
         .marker-dot.missing { background: #8E8E93; }
         .marker-dot.captured { background: #0A84FF; }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(255, 204, 0, 0.7); }
-            70% { box-shadow: 0 0 0 12px rgba(255, 204, 0, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(255, 204, 0, 0); }
-        }
-        
-        /* 右侧面板 - 影像 */
-        .panorama-panel { 
-            width: 65%; 
-            position: relative;
-            background: #000;
-        }
-        
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255, 204, 0, 0.7); } 70% { box-shadow: 0 0 0 12px rgba(255, 204, 0, 0); } 100% { box-shadow: 0 0 0 0 rgba(255, 204, 0, 0); } }
+        .panorama-panel { width: 65%; position: relative; background: #000; }
         #panorama { width: 100%; height: 100%; }
-        
-        .info-bar {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            padding: 15px 20px;
-            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
-            color: white;
-            z-index: 50;
-        }
+        .info-bar { position: absolute; top: 0; left: 0; right: 0; padding: 15px 20px; background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent); color: white; z-index: 50; }
         .info-bar h1 { font-size: 16px; font-weight: 500; margin-bottom: 4px; }
         .info-bar .floor-name { font-size: 13px; color: #0A84FF; }
-        
-        .nav-buttons {
-            position: absolute;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            gap: 10px;
-            z-index: 50;
-        }
-        .nav-btn {
-            padding: 12px 24px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            border: none;
-            border-radius: 24px;
-            cursor: pointer;
-            backdrop-filter: blur(10px);
-            font-size: 13px;
-        }
+        .nav-buttons { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; z-index: 50; }
+        .nav-btn { padding: 12px 24px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 24px; cursor: pointer; backdrop-filter: blur(10px); font-size: 13px; }
         .nav-btn:hover { background: rgba(0,0,0,0.9); }
-        
-        /* 控制按钮组 */
-        .control-buttons {
-            position: absolute;
-            top: 15px;
-            right: 20px;
-            display: flex;
-            gap: 10px;
-            z-index: 60;
-        }
-        
-        .control-btn {
-            padding: 8px 16px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            border: none;
-            border-radius: 20px;
-            cursor: pointer;
-            backdrop-filter: blur(10px);
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            transition: all 0.2s;
-        }
-        
+        .control-buttons { position: absolute; top: 15px; right: 20px; display: flex; gap: 10px; z-index: 60; }
+        .control-btn { padding: 8px 16px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 20px; cursor: pointer; backdrop-filter: blur(10px); font-size: 13px; display: flex; align-items: center; gap: 5px; transition: all 0.2s; }
         .control-btn:hover { background: rgba(0,0,0,0.9); }
         .control-btn.active { background: #0A84FF; }
         .control-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        
-        /* VR 模式样式 */
         .vr-mode .panorama-panel { width: 100% !important; height: 100% !important; }
         .vr-mode .floorplan-panel { display: none !important; }
         .vr-mode .nav-buttons { display: none; }
         .vr-mode .info-bar { display: none; }
-        
-        /* VR 分屏容器 */
-        #vr-container {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: #000;
-            z-index: 1000;
-        }
-        
-        #vr-container.active {
-            display: flex;
-        }
-        
-        .vr-eye {
-            flex: 1;
-            height: 100%;
-            position: relative;
-            overflow: hidden;
-        }
-        
+        #vr-container { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #000; z-index: 1000; }
+        #vr-container.active { display: flex; }
+        .vr-eye { flex: 1; height: 100%; position: relative; overflow: hidden; }
         .vr-eye-left { border-right: 1px solid #333; }
-        
-        .vr-close-btn {
-            position: absolute;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            padding: 12px 24px;
-            background: rgba(255,0,0,0.8);
-            color: white;
-            border: none;
-            border-radius: 24px;
-            cursor: pointer;
-            font-size: 13px;
-            z-index: 1001;
-        }
-        
-        /* 陀螺仪模式提示 */
-        .gyro-hint {
-            position: absolute;
-            bottom: 80px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 8px 16px;
-            border-radius: 20px;
-            font-size: 12px;
-            pointer-events: none;
-            opacity: 0;
-            transition: opacity 0.3s;
-        }
-        
+        .vr-close-btn { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); padding: 12px 24px; background: rgba(255,0,0,0.8); color: white; border: none; border-radius: 24px; cursor: pointer; font-size: 13px; z-index: 1001; }
+        .gyro-hint { position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: white; padding: 8px 16px; border-radius: 20px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.3s; }
         .gyro-hint.show { opacity: 1; }
-        
-        /* 图片查看模式 */
-        #photoViewer {
-            display: none;
-            width: 100%;
-            height: 100%;
-            position: relative;
-            overflow: hidden;
-            background: #000;
-            align-items: center;
-            justify-content: center;
-        }
+        #photoViewer { display: none; width: 100%; height: 100%; position: relative; overflow: hidden; background: #000; align-items: center; justify-content: center; }
         #photoViewer.active { display: flex; }
-        #photoViewer img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            transition: transform 0.1s ease-out;
-            user-select: none;
-            -webkit-user-drag: none;
-        }
-        .photo-nav {
-            position: absolute;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 44px;
-            height: 44px;
-            border-radius: 50%;
-            border: none;
-            background: rgba(0,0,0,0.6);
-            color: white;
-            font-size: 20px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 55;
-            backdrop-filter: blur(4px);
-        }
+        #photoViewer img { max-width: 100%; max-height: 100%; object-fit: contain; transition: transform 0.1s ease-out; user-select: none; -webkit-user-drag: none; }
+        .photo-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; border-radius: 50%; border: none; background: rgba(0,0,0,0.6); color: white; font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 55; backdrop-filter: blur(4px); }
         .photo-nav:hover { background: rgba(0,0,0,0.85); }
         .photo-nav.prev { left: 15px; }
         .photo-nav.next { right: 15px; }
-        .photo-counter {
+        .photo-counter { position: absolute; bottom: 70px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.6); color: white; padding: 6px 14px; border-radius: 16px; font-size: 13px; z-index: 55; backdrop-filter: blur(4px); }
+        @media (max-width: 768px) { .container { flex-direction: column; } .floorplan-panel { width: 100%; height: 35%; border-right: none; border-bottom: 1px solid #333; } .panorama-panel { width: 100%; height: 65%; } .control-buttons { top: auto; bottom: 80px; right: 10px; flex-direction: column; } .control-btn { padding: 10px; font-size: 12px; } .control-btn span { display: none; } }
+        .brand-footer { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 16px; background: rgba(0,0,0,0.55); color: rgba(255,255,255,0.55); font-size: 11px; text-align: center; z-index: 200; backdrop-filter: blur(4px); pointer-events: auto; }
+        .brand-footer a { color: #0A84FF; text-decoration: none; margin-left: 6px; }
+        .brand-footer a:hover { text-decoration: underline; }
+        @media (max-width: 768px) { .brand-footer { font-size: 10px; padding: 4px 12px; } }
+
+        /* ========== 时空转换环（黑洞形态 + 透视变形） ========== */
+        /* 覆盖 Pannellum 默认热点样式 */
+        .pnlm-hotspot {
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+        }
+
+        /* 时空转换环主样式 */
+        .pnlm-hotspot.roam-hotspot {
+            border-radius: 50% !important;
+            cursor: pointer !important;
+            background: radial-gradient(circle at 35% 35%, 
+                rgba(30,30,35,0.9) 0%, 
+                rgba(5,5,8,0.98) 45%, 
+                rgba(15,15,20,0.95) 100%) !important;
+            box-shadow: 
+                inset 0 3px 10px rgba(0,0,0,0.95),
+                inset 0 -1px 3px rgba(255,255,255,0.08),
+                0 0 0 1.5px rgba(255,255,255,0.12),
+                0 2px 8px rgba(0,0,0,0.4) !important;
+            transition: all 0.25s ease !important;
+        }
+
+        .pnlm-hotspot.roam-hotspot:hover {
+            z-index: 10000 !important;
+            filter: brightness(1.4) !important;
+            box-shadow: 
+                inset 0 3px 12px rgba(0,0,0,1),
+                0 0 0 2px rgba(10,132,255,0.5),
+                0 0 20px rgba(10,132,255,0.3) !important;
+        }
+
+        /* 脉冲动画 */
+        .pnlm-hotspot.roam-hotspot.pulse {
+            animation: wormholePulse 2.5s ease-in-out infinite;
+        }
+        @keyframes wormholePulse {
+            0%, 100% { 
+                box-shadow: inset 0 3px 10px rgba(0,0,0,0.95), 0 0 0 1.5px rgba(255,255,255,0.12); 
+            }
+            50% { 
+                box-shadow: inset 0 3px 14px rgba(0,0,0,1), 0 0 0 2.5px rgba(10,132,255,0.5), 0 0 25px rgba(10,132,255,0.25); 
+            }
+        }
+
+        /* 身后点：弱化 */
+        .pnlm-hotspot.roam-hotspot.behind {
+            filter: grayscale(0.6) brightness(0.6) !important;
+            opacity: 0.45 !important;
+        }
+
+        /* 脉冲光环动画 */
+        @keyframes hotspotPulse {
+            0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0.8; }
+            100% { transform: translate(-50%, -50%) scale(2.2); opacity: 0; }
+        }
+
+        /* 箭头弹跳动画 */
+        @keyframes arrowBounce {
+            0%, 100% { transform: translate(-50%, -50%) translateY(0); }
+            50% { transform: translate(-50%, -50%) translateY(-6px); }
+        }
+
+        /* 漩涡旋转动画 */
+        @keyframes vortexSpin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+        /* 脉冲光环动画 */
+        @keyframes hotspotPulse {
+            0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0.8; }
+            100% { transform: translate(-50%, -50%) scale(2.2); opacity: 0; }
+        }
+
+        /* 箭头弹跳动画 */
+        @keyframes arrowBounce {
+            0%, 100% { transform: translate(-50%, -50%) translateY(0); }
+            50% { transform: translate(-50%, -50%) translateY(-6px); }
+        }
+
+        /* 漩涡旋转动画 */
+        @keyframes vortexSpin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+
+        /* 点位名称标签（默认隐藏，hover显示） */
+        .pnlm-hotspot.roam-hotspot .marker-label {
             position: absolute;
-            bottom: 70px;
+            bottom: calc(100% + 8px);
             left: 50%;
             transform: translateX(-50%);
-            background: rgba(0,0,0,0.6);
+            white-space: nowrap;
+            background: rgba(0,0,0,0.8);
             color: white;
-            padding: 6px 14px;
-            border-radius: 16px;
-            font-size: 13px;
-            z-index: 55;
-            backdrop-filter: blur(4px);
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            pointer-events: none;
+            display: block;
+            opacity: 0.9;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.2);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
         }
+        /* 不设置 hover 规则：label 元素由 JS 根据 showName 控制是否创建，存在即显示 */
+
+        /* 漫游设置面板 */
+        #roamSettingsPanel { display: none; position: absolute; top: 60px; right: 20px; width: 360px; max-height: 85vh; overflow-y: auto; background: rgba(28,28,30,0.96); border: 1px solid #444; border-radius: 14px; padding: 20px; z-index: 200; backdrop-filter: blur(16px); font-size: 12px; color: #fff; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+        #roamSettingsPanel::-webkit-scrollbar { width: 6px; }
+        #roamSettingsPanel::-webkit-scrollbar-track { background: transparent; }
+        #roamSettingsPanel::-webkit-scrollbar-thumb { background: #555; border-radius: 3px; }
+        #roamSettingsPanel::-webkit-scrollbar-thumb:hover { background: #777; }
         
-        /* 移动端适配 */
-        @media (max-width: 768px) {
-            .container { flex-direction: column; }
-            .floorplan-panel { 
-                width: 100%;
-                height: 35%;
-                border-right: none;
-                border-bottom: 1px solid #333;
-            }
-            .panorama-panel { 
-                width: 100%; 
-                height: 65%;
-            }
-            .control-buttons {
-                top: auto;
-                bottom: 80px;
-                right: 10px;
-                flex-direction: column;
-            }
-            .control-btn {
-                padding: 10px;
-                font-size: 12px;
-            }
-            .control-btn span { display: none; }
-        }
+        .roam-section { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #333; }
+        .roam-section:last-child { border-bottom: none; margin-bottom: 0; }
+        .roam-section-title { font-size: 13px; font-weight: 600; color: #0A84FF; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+        .roam-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; min-height: 32px; }
+        .roam-row label { color: #ccc; font-size: 12px; flex: 1; }
+        .roam-row .roam-value { color: #0A84FF; font-weight: 600; min-width: 50px; text-align: right; font-size: 12px; }
+        .roam-row input[type="range"] { -webkit-appearance: none; height: 4px; background: #444; border-radius: 2px; outline: none; width: 120px; margin: 0 10px; }
+        .roam-row input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; background: #0A84FF; border-radius: 50%; cursor: pointer; border: 2px solid #fff; box-shadow: 0 2px 8px rgba(10,132,255,0.4); }
+        .roam-row input[type="color"] { width: 40px; height: 24px; border: none; border-radius: 4px; cursor: pointer; background: none; }
+        .roam-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: #0A84FF; cursor: pointer; }
+        .roam-row .roam-input-num { width: 60px; padding: 4px 8px; background: #2C2C2E; border: 1px solid #444; border-radius: 6px; color: #fff; font-size: 12px; text-align: center; }
+        .roam-row .roam-input-num:focus { outline: none; border-color: #0A84FF; }
+        .roam-btns { display: flex; gap: 8px; margin-top: 12px; }
+        .roam-btn { flex: 1; padding: 10px; border: none; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 500; transition: all 0.2s; }
+        .roam-btn.primary { background: #0A84FF; color: white; }
+        .roam-btn.primary:hover { background: #0866c6; }
+        .roam-btn.danger { background: #FF3B30; color: white; }
+        .roam-btn.danger:hover { background: #B32418; }
+        .roam-btn.secondary { background: #3A3A3C; color: #fff; border: 1px solid #555; }
+        .roam-btn.secondary:hover { background: #48484A; }
+        .roam-hint { color: #888; font-size: 11px; margin-top: 6px; line-height: 1.5; }
+        .roam-hint code { background: #2C2C2E; padding: 2px 6px; border-radius: 4px; color: #FFCC00; font-family: monospace; }
+        .roam-preview-box { background: #2C2C2E; border-radius: 8px; padding: 12px; margin-top: 8px; }
+        .roam-preview-title { font-size: 11px; color: #888; margin-bottom: 6px; }
+        .roam-preview-dot { display: inline-block; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
         
-        /* 品牌页脚 */
-        .brand-footer {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            padding: 6px 16px;
-            background: rgba(0,0,0,0.55);
-            color: rgba(255,255,255,0.55);
-            font-size: 11px;
-            text-align: center;
-            z-index: 200;
-            backdrop-filter: blur(4px);
-            pointer-events: auto;
-        }
-        .brand-footer a {
-            color: #0A84FF;
-            text-decoration: none;
-            margin-left: 6px;
-        }
-        .brand-footer a:hover {
-            text-decoration: underline;
-        }
-        @media (max-width: 768px) {
-            .brand-footer { font-size: 10px; padding: 4px 12px; }
-        }
+        /* 实时生效提示 */
+        .live-indicator { position: absolute; top: 60px; right: 390px; background: rgba(52,199,89,0.9); color: white; padding: 6px 14px; border-radius: 16px; font-size: 12px; z-index: 199; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+        .live-indicator.show { opacity: 1; }
     </style>
 </head>
 <body>
@@ -4069,6 +5198,7 @@ class PanoramaManager(QMainWindow):
                 <h1 id="current-title">请选择点位</h1>
                 <div class="floor-name" id="current-floor">-</div>
             </div>
+            <div class="roam-indicator" id="roamIndicator" style="display:none;position:absolute;top:60px;right:20px;background:rgba(52,199,89,0.9);color:white;padding:6px 14px;border-radius:16px;font-size:12px;z-index:60;">🌌 时空转换：点击黑洞环穿梭</div>
             <div id="panorama"></div>
             <div id="photoViewer">
                 <button class="photo-nav prev" id="photoPrev" onclick="prevPhoto()" title="上一张">◀</button>
@@ -4078,16 +5208,281 @@ class PanoramaManager(QMainWindow):
             </div>
             <div class="gyro-hint" id="gyroHint">陀螺仪模式已开启，移动手机查看</div>
             <div class="control-buttons">
-                <button class="control-btn" id="viewModeBtn" onclick="toggleViewMode()" title="切换查看模式">
-                    🖼️ <span>图片</span>
-                </button>
-                <button class="control-btn" id="gyroBtn" onclick="toggleGyro()" title="陀螺仪模式">
-                    📱 <span>陀螺仪</span>
-                </button>
-                <button class="control-btn" id="vrBtn" onclick="toggleVR()" title="VR 模式">
-                    🥽 <span>VR模式</span>
-                </button>
+                <button class="control-btn" id="viewModeBtn" onclick="toggleViewMode()" title="切换查看模式">🖼️ <span>图片</span></button>
+                <button class="control-btn" id="gyroBtn" onclick="toggleGyro()" title="陀螺仪模式">📱 <span>陀螺仪</span></button>
+                <button class="control-btn" id="vrBtn" onclick="toggleVR()" title="VR 模式">🥽 <span>VR模式</span></button>
+                <button class="control-btn" id="roamSettingsBtn" onclick="toggleRoamSettings()" title="时空转换设置">⚙️ <span>时空设置</span></button>
             </div>
+
+            <!-- 实时生效提示 -->
+            <div class="live-indicator" id="liveIndicator">⚡ 设置已实时生效</div>
+
+            <!-- 漫游设置面板 -->
+            <div id="roamSettingsPanel">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+                    <h2 style="margin:0;font-size:16px;">🌌 时空转换设置</h2>
+                    <button onclick="toggleRoamSettings()" style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:50%;transition:background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='none'">×</button>
+                </div>
+
+                <!-- 功能开关 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">🔌 功能开关</div>
+                    <div class="roam-row">
+                        <label>智能朝向保持（切换场景保持视角）</label>
+                        <input type="checkbox" id="cfg_smartOrientation" onchange="updateRoamConfig('smartOrientationEnabled', this.checked)">
+                    </div>
+                    <div class="roam-row">
+                        <label>预加载相邻场景（后台缓存）</label>
+                        <input type="checkbox" id="cfg_preload" onchange="updateRoamConfig('preloadEnabled', this.checked)">
+                    </div>
+                    <div class="roam-row">
+                        <label>脉冲动画（最近热点呼吸效果）</label>
+                        <input type="checkbox" id="cfg_pulse" onchange="updateRoamConfig('pulseEnabled', this.checked)">
+                    </div>
+                    <div class="roam-row">
+                        <label>调试日志（控制台输出计算过程）</label>
+                        <input type="checkbox" id="cfg_debug" onchange="updateRoamConfig('debugLog', this.checked)">
+                    </div>
+                    <div class="roam-row">
+                        <label>显示点位名称标签（默认隐藏）</label>
+                        <input type="checkbox" id="cfg_showName" onchange="updateRoamConfig('showName', this.checked); applyCurrentSettings()">
+                    </div>
+                    <div class="roam-hint">💡 关闭「智能朝向保持」可让每次跳转都正对下一个点位<br>💡 开启「显示点位名称」可在热点上方常驻显示目标名称</div>
+                </div>
+
+                <!-- 灭点高度 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">📐 灭点高度（俯仰角）</div>
+                    <div class="roam-row">
+                        <label>灭点俯仰角（远处地平线高度）</label>
+                        <input type="range" id="cfg_vanishingPitch" min="-45" max="45" oninput="updateRoamConfig('vanishingPointPitch', parseInt(this.value));updateDisplay('val_vanishingPitch',this.value+'°')">
+                        <span class="roam-value" id="val_vanishingPitch">-15°</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>近处俯仰角（脚下地面，固定）</label>
+                        <span class="roam-value" style="color:#888;">-85°</span>
+                    </div>
+                    <div class="roam-hint">灭点高度决定远处转换点在全景中的垂直位置<br>值越大（接近45°）灭点越高（地平线以上），值越小（-45°）灭点越低</div>
+                </div>
+
+                <!-- 转换点样式 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">🎨 转换点样式</div>
+                    <div class="roam-row">
+                        <label>选择引导样式</label>
+                        <select id="cfg_hotspotStyle" onchange="updateRoamConfig('hotspotStyle', this.value); updateStylePreview(this.value); applyCurrentSettings()" style="background:#2C2C2E;color:#fff;border:1px solid #444;border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;">
+                            <option value="blackhole">🕳️ 黑洞环（多层同心圆）</option>
+                            <option value="pulse">💫 脉冲光环（游戏标记）</option>
+                            <option value="arrow">⬇️ 箭头指引（3D指向）</option>
+                        </select>
+                    </div>
+                    <div class="roam-preview-box">
+                        <div class="roam-preview-title">样式预览</div>
+                        <div id="stylePreview" style="display:flex;gap:12px;align-items:center;justify-content:center;height:60px;">
+                            <div id="previewBlackhole" style="display:none;width:40px;height:40px;border-radius:50%;border:3px solid #34C759;box-shadow:0 0 10px rgba(52,199,89,0.4),inset 0 2px 6px rgba(0,0,0,0.7);position:relative;"><div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:10px;height:10px;border-radius:50%;background:rgba(0,0,0,0.9);"></div></div>
+                            <div id="previewPulse" style="display:none;width:40px;height:40px;border-radius:50%;background:#34C759;position:relative;box-shadow:0 0 20px rgba(52,199,89,0.5);"><span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:white;font-size:16px;text-shadow:0 0 4px rgba(0,0,0,0.8);">▼</span></div>
+                            <div id="previewArrow" style="display:none;width:0;height:0;border-left:18px solid transparent;border-right:18px solid transparent;border-bottom:28px solid #34C759;filter:drop-shadow(0 0 8px rgba(52,199,89,0.5));position:relative;top:-4px;"></div>
+                        </div>
+                    </div>
+                    <div class="roam-hint">黑洞环：多层同心圆向中心收缩，适合科幻风格<br>脉冲光环：外发光脉冲+箭头，类似游戏任务标记<br>箭头指引：3D箭头+轨迹线，明确指向目标位置</div>
+                </div>
+
+                <!-- 显示数量限制 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">🔢 显示数量限制</div>
+                    <div class="roam-row">
+                        <label>最大显示转换点数量（0=不限制）</label>
+                        <input type="range" id="cfg_maxVisible" min="0" max="20" oninput="updateRoamConfig('maxVisibleHotspots', parseInt(this.value));updateDisplay('val_maxVisible',this.value==0?'不限':this.value+'个')">
+                        <span class="roam-value" id="val_maxVisible">不限</span>
+                    </div>
+                    <div class="roam-hint">限制显示数量可减少视觉混乱，只保留最近的转换点<br>设置为0显示所有转换点</div>
+                </div>
+
+                <!-- 热点大小 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">📐 热点大小（像素）</div>
+                    <div class="roam-row">
+                        <label>脚下（最近）大小</label>
+                        <input type="range" id="cfg_sizeMax" min="20" max="120" oninput="updateRoamConfig('sizeMax', parseInt(this.value));updateDisplay('val_sizeMax',this.value+'px')">
+                        <span class="roam-value" id="val_sizeMax">56px</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>灭点（最远）大小</label>
+                        <input type="range" id="cfg_sizeMin" min="2" max="40" oninput="updateRoamConfig('sizeMin', parseInt(this.value));updateDisplay('val_sizeMin',this.value+'px')">
+                        <span class="roam-value" id="val_sizeMin">10px</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>大小衰减曲线 <code>pow(ratio, curve)</code></label>
+                        <input type="range" id="cfg_sizeCurve" min="1" max="30" oninput="updateRoamConfig('sizeCurve', parseInt(this.value)/10);updateDisplay('val_sizeCurve',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_sizeCurve">0.7</span>
+                    </div>
+                    <div class="roam-hint">曲线值 <code>&lt;1</code> 近距离衰减慢（热点保持大更久），<code>&gt;1</code> 快速缩小</div>
+                </div>
+
+                <!-- 间距密度 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">📐 间距密度（远处点聚集）</div>
+                    <div class="roam-row">
+                        <label>远处点视觉压缩程度</label>
+                        <input type="range" id="cfg_spacingDensity" min="0" max="10" oninput="updateRoamConfig('spacingDensity', parseInt(this.value)/10);updateDisplay('val_spacingDensity',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_spacingDensity">0.3</span>
+                    </div>
+                    <div class="roam-hint">值越大，远处转换点越向灭点方向聚集<br>0=平面等距，1=最大聚集（灭点处重合）</div>
+                </div>
+
+                <!-- 透明度 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">👁️ 透明度</div>
+                    <div class="roam-row">
+                        <label>脚下（最近）不透明度</label>
+                        <input type="range" id="cfg_opacityMax" min="20" max="100" oninput="updateRoamConfig('opacityMax', parseInt(this.value)/100);updateDisplay('val_opacityMax',this.value+'%')">
+                        <span class="roam-value" id="val_opacityMax">100%</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>灭点（最远）不透明度</label>
+                        <input type="range" id="cfg_opacityMin" min="0" max="60" oninput="updateRoamConfig('opacityMin', parseInt(this.value)/100);updateDisplay('val_opacityMin',this.value+'%')">
+                        <span class="roam-value" id="val_opacityMin">15%</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>透明度衰减曲线</label>
+                        <input type="range" id="cfg_opacityCurve" min="1" max="30" oninput="updateRoamConfig('opacityCurve', parseInt(this.value)/10);updateDisplay('val_opacityCurve',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_opacityCurve">0.5</span>
+                    </div>
+                </div>
+
+                <!-- 颜色 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">🎨 颜色（RGB）</div>
+                    <div class="roam-row">
+                        <label>脚下（最近）颜色</label>
+                        <input type="color" id="cfg_colorNear" value="#34C759" onchange="updateRoamColor('colorNear', this.value)">
+                    </div>
+                    <div class="roam-row">
+                        <label>灭点（最远）颜色</label>
+                        <input type="color" id="cfg_colorFar" value="#8E8E93" onchange="updateRoamColor('colorFar', this.value)">
+                    </div>
+                    <div class="roam-preview-box">
+                        <div class="roam-preview-title">颜色预览</div>
+                        <div id="colorPreview" style="display:flex;gap:8px;align-items:center;">
+                            <span class="roam-preview-dot" id="previewNear" style="width:24px;height:24px;background:#34C759;"></span>
+                            <span style="color:#666;">→</span>
+                            <span class="roam-preview-dot" id="previewFar" style="width:12px;height:12px;background:#8E8E93;opacity:0.5;"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 身后点处理 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">↩️ 身后点（视野外）处理</div>
+                    <div class="roam-row">
+                        <label>大小缩放比例</label>
+                        <input type="range" id="cfg_behindSize" min="1" max="10" oninput="updateRoamConfig('behindSizeScale', parseInt(this.value)/10);updateDisplay('val_behindSize',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_behindSize">0.7</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>透明度缩放比例</label>
+                        <input type="range" id="cfg_behindOpacity" min="1" max="10" oninput="updateRoamConfig('behindOpacityScale', parseInt(this.value)/10);updateDisplay('val_behindOpacity',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_behindOpacity">0.5</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>灰度化程度</label>
+                        <input type="range" id="cfg_behindGray" min="0" max="10" oninput="updateRoamConfig('behindGrayScale', parseInt(this.value)/10);updateDisplay('val_behindGray',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_behindGray">0.3</span>
+                    </div>
+                    <div class="roam-hint">身后点指视野后方（|yaw|>120°）的热点，通常需要弱化显示</div>
+                </div>
+
+                <!-- 边框与阴影 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">✨ 边框与阴影</div>
+                    <div class="roam-row">
+                        <label>近处边框透明度</label>
+                        <input type="range" id="cfg_borderNear" min="20" max="100" oninput="updateRoamConfig('borderOpacityNear', parseInt(this.value)/100);updateDisplay('val_borderNear',this.value+'%')">
+                        <span class="roam-value" id="val_borderNear">95%</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>远处边框透明度</label>
+                        <input type="range" id="cfg_borderFar" min="0" max="80" oninput="updateRoamConfig('borderOpacityFar', parseInt(this.value)/100);updateDisplay('val_borderFar',this.value+'%')">
+                        <span class="roam-value" id="val_borderFar">40%</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>阴影强度倍率</label>
+                        <input type="range" id="cfg_shadow" min="0" max="20" oninput="updateRoamConfig('shadowIntensity', parseInt(this.value)/10);updateDisplay('val_shadow',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_shadow">1.0</span>
+                    </div>
+                </div>
+
+                <!-- 智能朝向 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">🧭 智能朝向保持参数</div>
+                    <div class="roam-row">
+                        <label>俯仰角限制（±度）</label>
+                        <input type="range" id="cfg_pitchLimit" min="0" max="90" oninput="updateRoamConfig('pitchLimit', parseInt(this.value));updateDisplay('val_pitchLimit',this.value+'°')">
+                        <span class="roam-value" id="val_pitchLimit">30°</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>俯仰角阻尼系数（0-1）</label>
+                        <input type="range" id="cfg_pitchDamp" min="0" max="10" oninput="updateRoamConfig('pitchDamping', parseInt(this.value)/10);updateDisplay('val_pitchDamp',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_pitchDamp">0.5</span>
+                    </div>
+                    <div class="roam-hint">阻尼 <code>0.5</code> 表示切换后俯仰角变为原来一半，防止视角过偏</div>
+                </div>
+
+                <!-- 预加载 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">⏳ 预加载参数</div>
+                    <div class="roam-row">
+                        <label>预加载延迟（毫秒）</label>
+                        <input type="range" id="cfg_preloadDelay" min="0" max="3000" step="100" oninput="updateRoamConfig('preloadDelay', parseInt(this.value));updateDisplay('val_preloadDelay',this.value+'ms')">
+                        <span class="roam-value" id="val_preloadDelay">1000ms</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>最大并行加载数</label>
+                        <input type="range" id="cfg_maxConcurrent" min="1" max="5" oninput="updateRoamConfig('maxConcurrent', parseInt(this.value));updateDisplay('val_maxConcurrent',this.value)">
+                        <span class="roam-value" id="val_maxConcurrent">2</span>
+                    </div>
+                </div>
+
+                <!-- 过渡动画 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">🎬 过渡动画</div>
+                    <div class="roam-row">
+                        <label>淡出时长（毫秒）</label>
+                        <input type="range" id="cfg_fadeOut" min="0" max="1000" step="50" oninput="updateRoamConfig('fadeOutDuration', parseInt(this.value));updateDisplay('val_fadeOut',this.value+'ms')">
+                        <span class="roam-value" id="val_fadeOut">300ms</span>
+                    </div>
+                    <div class="roam-row">
+                        <label>淡入时长（毫秒）</label>
+                        <input type="range" id="cfg_fadeIn" min="0" max="2000" step="100" oninput="updateRoamConfig('fadeInDuration', parseInt(this.value));updateDisplay('val_fadeIn',this.value+'ms')">
+                        <span class="roam-value" id="val_fadeIn">800ms</span>
+                    </div>
+                </div>
+
+                <!-- 脉冲阈值 -->
+                <div class="roam-section">
+                    <div class="roam-section-title">💓 脉冲动画阈值</div>
+                    <div class="roam-row">
+                        <label>触发脉冲的最大透视比例</label>
+                        <input type="range" id="cfg_pulseThreshold" min="0" max="50" oninput="updateRoamConfig('pulseThreshold', parseInt(this.value)/100);updateDisplay('val_pulseThreshold',(parseInt(this.value)/100).toFixed(2))">
+                        <span class="roam-value" id="val_pulseThreshold">0.15</span>
+                    </div>
+                    <div class="roam-hint">只有 <code>perspectiveRatio &lt; 0.15</code> 的热点会播放呼吸动画</div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="roam-btns">
+                    <button class="roam-btn primary" onclick="RoamConfigStorage.save();showLiveIndicator('💾 设置已保存')">💾 保存到浏览器</button>
+                    <button class="roam-btn secondary" onclick="applyCurrentSettings();showLiveIndicator('⚡ 已应用到当前场景')">🔄 立即应用</button>
+                </div>
+                <div class="roam-btns" style="margin-top:8px;">
+                    <button class="roam-btn danger" onclick="RoamConfigStorage.reset()">🔄 恢复全部默认</button>
+                </div>
+                <div class="roam-hint" style="margin-top:10px;text-align:center;">
+                    修改数值后点击「立即应用」可实时预览效果<br>
+                    满意后点击「保存到浏览器」永久记住
+                </div>
+            </div>
+
             <div class="nav-buttons">
                 <button class="nav-btn" onclick="prevPanorama()">◀ 上一张</button>
                 <button class="nav-btn" onclick="nextPanorama()">下一张 ▶</button>
@@ -4095,7 +5490,6 @@ class PanoramaManager(QMainWindow):
         </div>
     </div>
     
-    <!-- VR 分屏容器 -->
     <div id="vr-container">
         <button class="vr-close-btn" onclick="exitVR()">退出 VR 模式</button>
         <div class="vr-eye vr-eye-left" id="vrLeft"></div>
@@ -4107,17 +5501,334 @@ class PanoramaManager(QMainWindow):
         let currentFloorIndex = 0;
         let currentMarkerIndex = 0;
         let viewer = null;
-        
-        function init() {
-            console.log('init() called, floors:', floors);
+
+        // ========== 工具函数 ==========
+        function normalizeAngle(angle) {
+            while (angle > 180) angle -= 360;
+            while (angle < -180) angle += 360;
+            return angle;
+        }
+
+        function getMoveAzimuth(fromMarker, toMarker) {
+            var dx = toMarker.x - fromMarker.x;
+            var dy = toMarker.y - fromMarker.y;
+            var azimuth = Math.atan2(dx, dy) * 180 / Math.PI;
+            return normalizeAngle(azimuth);
+        }
+
+        function hexToRgb(hex) {
+            var r = parseInt(hex.slice(1, 3), 16);
+            var g = parseInt(hex.slice(3, 5), 16);
+            var b = parseInt(hex.slice(5, 7), 16);
+            return [r, g, b];
+        }
+
+        function rgbToHex(r, g, b) {
+            return '#' + [r, g, b].map(function(x) {
+                var hex = Math.round(x).toString(16);
+                return hex.length === 1 ? '0' + hex : hex;
+            }).join('');
+        }
+
+        // ========== 预加载管理器 ==========
+        var PreloadManager = {
+            queue: [],
+            active: 0,
+            cache: new Set(),
+            add: function(url) {
+                if (this.cache.has(url) || this.queue.includes(url)) return;
+                this.queue.push(url);
+                this.process();
+            },
+            process: function() {
+                while (this.active < RoamConfig.maxConcurrent && this.queue.length > 0) {
+                    var url = this.queue.shift();
+                    this.load(url);
+                }
+            },
+            load: function(url) {
+                this.active++;
+                var self = this;
+                var img = new Image();
+                img.onload = img.onerror = function() {
+                    self.active--;
+                    self.cache.add(url);
+                    self.process();
+                };
+                img.src = url;
+            },
+            clear: function() { this.queue = []; },
+            preloadForMarker: function(marker) {
+                if (!marker || !marker.roamHotSpots) return;
+                var self = this;
+                marker.roamHotSpots.forEach(function(hs) {
+                    var target = null;
+                    for (var fi = 0; fi < floors.length; fi++) {
+                        for (var mi = 0; mi < floors[fi].markers.length; mi++) {
+                            if (floors[fi].markers[mi].id === hs.targetId) { target = floors[fi].markers[mi]; break; }
+                        }
+                        if (target) break;
+                    }
+                    if (target && target.panoramaPath) self.add(target.panoramaPath);
+                });
+            }
+        };
+
+        // ========== 漫游全局配置（所有参数均可手动调整） ==========
+        var RoamConfig = {
+            // 热点大小
+            sizeMin: 6,
+            sizeMax: 56,
+            sizeCurve: 1.2,
+            // 间距密度：远处点在视觉上的压缩程度（0-1，0=无压缩，1=最大压缩）
+            spacingDensity: 0.3,
+            // 透明度
+            opacityMin: 0.15,
+            opacityMax: 1.0,
+            opacityCurve: 0.5,
+            // 颜色 (RGB数组)
+            colorNear: [52, 199, 89],
+            colorFar: [142, 142, 147],
+            // 脉冲动画
+            pulseEnabled: true,
+            pulseThreshold: 0.15,
+            // 身后点
+            behindSizeScale: 0.65,
+            behindOpacityScale: 0.5,
+            behindGrayScale: 0.3,
+            // 边框与阴影
+            borderOpacityNear: 0.95,
+            borderOpacityFar: 0.4,
+            shadowIntensity: 1.0,
+            // 智能朝向保持
+            smartOrientationEnabled: true,
+            pitchLimit: 30,
+            pitchDamping: 0.5,
+            // 预加载
+            preloadEnabled: true,
+            preloadDelay: 1000,
+            maxConcurrent: 2,
+            // 过渡动画
+            fadeOutDuration: 300,
+            fadeInDuration: 800,
+            // 点位名称显示
+            showName: false,
+            // 灭点俯仰角（远处地平线高度，-45~45，正数=地平线以上）
+            vanishingPointPitch: -15,
+            // 热点样式
+            hotspotStyle: 'blackhole',
+            // 最大显示热点数（0=不限）
+            maxVisibleHotspots: 0,
+            // 调试
+            debugLog: false
+        };
+
+        // ========== 配置持久化 ==========
+        var RoamConfigStorage = {
+            key: 'panorama_roam_config_v2',
+            load: function() {
+                try {
+                    var saved = localStorage.getItem(this.key);
+                    if (saved) {
+                        var parsed = JSON.parse(saved);
+                        for (var k in parsed) {
+                            if (RoamConfig.hasOwnProperty(k)) RoamConfig[k] = parsed[k];
+                        }
+                        // 兼容旧配置：showLabel -> showName
+                        if (parsed.hasOwnProperty('showLabel') && !parsed.hasOwnProperty('showName')) {
+                            RoamConfig.showName = parsed.showLabel;
+                        }
+                        // 兼容旧配置：给新字段设置默认值
+                        if (!parsed.hasOwnProperty('vanishingPointPitch')) RoamConfig.vanishingPointPitch = -15;
+                        if (!parsed.hasOwnProperty('hotspotStyle')) RoamConfig.hotspotStyle = 'blackhole';
+                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 0;
+                        if (!parsed.hasOwnProperty('spacingDensity')) RoamConfig.spacingDensity = 0.3;
+                        // 兼容旧配置：给新字段设置默认值
+                        if (!parsed.hasOwnProperty('vanishingPointPitch')) RoamConfig.vanishingPointPitch = -15;
+                        if (!parsed.hasOwnProperty('hotspotStyle')) RoamConfig.hotspotStyle = 'blackhole';
+                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 0;
+                        if (!parsed.hasOwnProperty('spacingDensity')) RoamConfig.spacingDensity = 0.3;
+                        if (RoamConfig.debugLog) console.log('[配置] 已从 localStorage 加载保存的设置');
+                    }
+                } catch(e) { console.log('[配置] 加载失败:', e); }
+            },
+            save: function() {
+                try {
+                    localStorage.setItem(this.key, JSON.stringify(RoamConfig));
+                    if (RoamConfig.debugLog) console.log('[配置] 已保存到 localStorage');
+                } catch(e) { console.log('[配置] 保存失败:', e); }
+            },
+            reset: function() {
+                localStorage.removeItem(this.key);
+                location.reload();
+            }
+        };
+
+        // 页面加载时读取配置
+        RoamConfigStorage.load();
+
+        // ========== UI 同步：将当前配置值反映到设置面板 ==========
+        function syncUIFromConfig() {
+            // 开关
+            document.getElementById('cfg_smartOrientation').checked = RoamConfig.smartOrientationEnabled;
+            document.getElementById('cfg_preload').checked = RoamConfig.preloadEnabled;
+            document.getElementById('cfg_pulse').checked = RoamConfig.pulseEnabled;
+            document.getElementById('cfg_debug').checked = RoamConfig.debugLog;
+            document.getElementById('cfg_showName').checked = RoamConfig.showName;
+
+            // 灭点高度
+            document.getElementById('cfg_vanishingPitch').value = RoamConfig.vanishingPointPitch;
+            document.getElementById('val_vanishingPitch').textContent = RoamConfig.vanishingPointPitch + '°';
+
+            // 样式选择
+            document.getElementById('cfg_hotspotStyle').value = RoamConfig.hotspotStyle;
+            updateStylePreview(RoamConfig.hotspotStyle);
+
+            // 显示数量
+            document.getElementById('cfg_maxVisible').value = RoamConfig.maxVisibleHotspots;
+            document.getElementById('val_maxVisible').textContent = RoamConfig.maxVisibleHotspots === 0 ? '不限' : RoamConfig.maxVisibleHotspots + '个';
+            document.getElementById('cfg_showName').checked = RoamConfig.showName;
             
-            if (!floors || floors.length === 0) {
-                document.getElementById('floorplanContainer').innerHTML = 
-                    '<p style="color: #666;">暂无楼层数据</p>';
+            // 大小
+            document.getElementById('cfg_sizeMax').value = RoamConfig.sizeMax;
+            document.getElementById('val_sizeMax').textContent = RoamConfig.sizeMax + 'px';
+            document.getElementById('cfg_sizeMin').value = RoamConfig.sizeMin;
+            document.getElementById('val_sizeMin').textContent = RoamConfig.sizeMin + 'px';
+            document.getElementById('cfg_sizeCurve').value = Math.round(RoamConfig.sizeCurve * 10);
+            document.getElementById('val_sizeCurve').textContent = RoamConfig.sizeCurve.toFixed(1);
+            // 间距密度
+            document.getElementById('cfg_spacingDensity').value = Math.round((RoamConfig.spacingDensity || 0.3) * 10);
+            document.getElementById('val_spacingDensity').textContent = ((RoamConfig.spacingDensity || 0.3)).toFixed(1);
+            
+            // 透明度
+            document.getElementById('cfg_opacityMax').value = Math.round(RoamConfig.opacityMax * 100);
+            document.getElementById('val_opacityMax').textContent = Math.round(RoamConfig.opacityMax * 100) + '%';
+            document.getElementById('cfg_opacityMin').value = Math.round(RoamConfig.opacityMin * 100);
+            document.getElementById('val_opacityMin').textContent = Math.round(RoamConfig.opacityMin * 100) + '%';
+            document.getElementById('cfg_opacityCurve').value = Math.round(RoamConfig.opacityCurve * 10);
+            document.getElementById('val_opacityCurve').textContent = RoamConfig.opacityCurve.toFixed(1);
+            
+            // 颜色
+            document.getElementById('cfg_colorNear').value = rgbToHex(RoamConfig.colorNear[0], RoamConfig.colorNear[1], RoamConfig.colorNear[2]);
+            document.getElementById('cfg_colorFar').value = rgbToHex(RoamConfig.colorFar[0], RoamConfig.colorFar[1], RoamConfig.colorFar[2]);
+            document.getElementById('previewNear').style.background = document.getElementById('cfg_colorNear').value;
+            document.getElementById('previewFar').style.background = document.getElementById('cfg_colorFar').value;
+            
+            // 身后点
+            document.getElementById('cfg_behindSize').value = Math.round(RoamConfig.behindSizeScale * 10);
+            document.getElementById('val_behindSize').textContent = RoamConfig.behindSizeScale.toFixed(1);
+            document.getElementById('cfg_behindOpacity').value = Math.round(RoamConfig.behindOpacityScale * 10);
+            document.getElementById('val_behindOpacity').textContent = RoamConfig.behindOpacityScale.toFixed(1);
+            document.getElementById('cfg_behindGray').value = Math.round(RoamConfig.behindGrayScale * 10);
+            document.getElementById('val_behindGray').textContent = RoamConfig.behindGrayScale.toFixed(1);
+            
+            // 边框阴影
+            document.getElementById('cfg_borderNear').value = Math.round(RoamConfig.borderOpacityNear * 100);
+            document.getElementById('val_borderNear').textContent = Math.round(RoamConfig.borderOpacityNear * 100) + '%';
+            document.getElementById('cfg_borderFar').value = Math.round(RoamConfig.borderOpacityFar * 100);
+            document.getElementById('val_borderFar').textContent = Math.round(RoamConfig.borderOpacityFar * 100) + '%';
+            document.getElementById('cfg_shadow').value = Math.round(RoamConfig.shadowIntensity * 10);
+            document.getElementById('val_shadow').textContent = RoamConfig.shadowIntensity.toFixed(1);
+            
+            // 智能朝向
+            document.getElementById('cfg_pitchLimit').value = RoamConfig.pitchLimit;
+            document.getElementById('val_pitchLimit').textContent = RoamConfig.pitchLimit + '°';
+            document.getElementById('cfg_pitchDamp').value = Math.round(RoamConfig.pitchDamping * 10);
+            document.getElementById('val_pitchDamp').textContent = RoamConfig.pitchDamping.toFixed(1);
+            
+            // 预加载
+            document.getElementById('cfg_preloadDelay').value = RoamConfig.preloadDelay;
+            document.getElementById('val_preloadDelay').textContent = RoamConfig.preloadDelay + 'ms';
+            document.getElementById('cfg_maxConcurrent').value = RoamConfig.maxConcurrent;
+            document.getElementById('val_maxConcurrent').textContent = RoamConfig.maxConcurrent;
+            
+            // 过渡动画
+            document.getElementById('cfg_fadeOut').value = RoamConfig.fadeOutDuration;
+            document.getElementById('val_fadeOut').textContent = RoamConfig.fadeOutDuration + 'ms';
+            document.getElementById('cfg_fadeIn').value = RoamConfig.fadeInDuration;
+            document.getElementById('val_fadeIn').textContent = RoamConfig.fadeInDuration + 'ms';
+            
+            // 脉冲阈值
+            document.getElementById('cfg_pulseThreshold').value = Math.round(RoamConfig.pulseThreshold * 100);
+            document.getElementById('val_pulseThreshold').textContent = RoamConfig.pulseThreshold.toFixed(2);
+        }
+
+        // ========== 配置更新函数（实时热更新） ==========
+        function updateStylePreview(style) {
+            document.getElementById('previewBlackhole').style.display = style === 'blackhole' ? 'block' : 'none';
+            document.getElementById('previewPulse').style.display = style === 'pulse' ? 'block' : 'none';
+            document.getElementById('previewArrow').style.display = style === 'arrow' ? 'block' : 'none';
+        }
+
+        function updateStylePreview(style) {
+            var pb = document.getElementById('previewBlackhole');
+            var pp = document.getElementById('previewPulse');
+            var pa = document.getElementById('previewArrow');
+            if (pb) pb.style.display = style === 'blackhole' ? 'block' : 'none';
+            if (pp) pp.style.display = style === 'pulse' ? 'block' : 'none';
+            if (pa) pa.style.display = style === 'arrow' ? 'block' : 'none';
+        }
+
+        function updateRoamConfig(key, value) {
+            RoamConfig[key] = value;
+            if (RoamConfig.debugLog) console.log('[配置更新]', key, '=', value);
+        }
+
+        function updateRoamColor(key, hexValue) {
+            RoamConfig[key] = hexToRgb(hexValue);
+            document.getElementById('previewNear').style.background = document.getElementById('cfg_colorNear').value;
+            document.getElementById('previewFar').style.background = document.getElementById('cfg_colorFar').value;
+            if (RoamConfig.debugLog) console.log('[颜色更新]', key, '=', hexValue, '→ RGB', RoamConfig[key]);
+        }
+
+        function updateDisplay(elementId, text) {
+            document.getElementById(elementId).textContent = text;
+        }
+
+        function showLiveIndicator(text) {
+            var el = document.getElementById('liveIndicator');
+            el.textContent = text;
+            el.classList.add('show');
+            setTimeout(function() { el.classList.remove('show'); }, 2000);
+        }
+
+        // ========== 核心：将当前配置应用到已加载的全景 ==========
+        function applyCurrentSettings() {
+            if (!viewer) {
+                showLiveIndicator('❌ 请先选择一个有影像的点位');
                 return;
             }
-            
-            // 创建楼层标签
+            // 重新加载当前场景以应用新设置
+            var floor = floors[currentFloorIndex];
+            var marker = floor.markers[currentMarkerIndex];
+            if (marker && marker.panoramaPath) {
+                // 记录当前视角
+                var prevYaw = 0, prevPitch = 0;
+                try {
+                    prevYaw = viewer.getYaw();
+                    prevPitch = viewer.getPitch();
+                } catch(e) {}
+                // 销毁并重建（最简单的方式确保所有热点样式更新）
+                viewer.destroy();
+                showPanoramaViewer(marker, marker.photos || [marker.panoramaPath]);
+                // 恢复视角
+                try {
+                    if (viewer) {
+                        viewer.setYaw(prevYaw, false);
+                        viewer.setPitch(prevPitch, false);
+                    }
+                } catch(e) {}
+                showLiveIndicator('⚡ 设置已实时生效');
+            }
+        }
+
+        // ========== 初始化 ==========
+        function init() {
+            console.log('init() called, floors:', floors);
+            if (!floors || floors.length === 0) {
+                document.getElementById('floorplanContainer').innerHTML = '<p style="color: #666;">暂无楼层数据</p>';
+                return;
+            }
             const tabsContainer = document.getElementById('floorTabs');
             floors.forEach((floor, idx) => {
                 const tab = document.createElement('button');
@@ -4126,23 +5837,20 @@ class PanoramaManager(QMainWindow):
                 tab.onclick = () => switchFloor(idx);
                 tabsContainer.appendChild(tab);
             });
-            
-            // 加载第一个楼层
+            // 同步UI显示
+            syncUIFromConfig();
             loadFloor(0);
         }
-        
+
         function switchFloor(index) {
             currentFloorIndex = index;
             currentMarkerIndex = 0;
-            
-            // 更新标签样式
             document.querySelectorAll('.floor-tab').forEach((tab, idx) => {
                 tab.classList.toggle('active', idx === index);
             });
-            
             loadFloor(index);
         }
-        
+
         // 全局缩放状态
         let currentScale = 1;
         let currentOffsetX = 0;
@@ -4152,50 +5860,33 @@ class PanoramaManager(QMainWindow):
         let dragStartY = 0;
         let lastTouchDistance = 0;
         let lastTouchCenter = null;
-        
+
         function loadFloor(index) {
             const floor = floors[index];
             const container = document.getElementById('floorplanContainer');
-            
             container.innerHTML = '';
-            
-            // 重置缩放状态
             currentScale = 1;
             currentOffsetX = 0;
             currentOffsetY = 0;
-            
-            // 创建包装器
             const wrapper = document.createElement('div');
             wrapper.className = 'floorplan-wrapper';
             wrapper.id = 'floorplanWrapper';
             container.appendChild(wrapper);
-            
             const img = document.createElement('img');
             img.src = floor.floorplan;
             img.alt = floor.name;
             img.id = 'floorplanImg';
-            
             img.onload = () => {
                 wrapper.appendChild(img);
-                
-                // 计算图片实际显示尺寸（保持宽高比的缩放）
                 const imgNaturalWidth = img.naturalWidth;
                 const imgNaturalHeight = img.naturalHeight;
                 const wrapperWidth = wrapper.clientWidth;
                 const wrapperHeight = wrapper.clientHeight;
-                
-                const baseScale = Math.min(
-                    wrapperWidth / imgNaturalWidth,
-                    wrapperHeight / imgNaturalHeight
-                );
-                
+                const baseScale = Math.min(wrapperWidth / imgNaturalWidth, wrapperHeight / imgNaturalHeight);
                 const displayedWidth = imgNaturalWidth * baseScale;
                 const displayedHeight = imgNaturalHeight * baseScale;
-                
                 const offsetX = (wrapperWidth - displayedWidth) / 2;
                 const offsetY = (wrapperHeight - displayedHeight) / 2;
-                
-                // 保存基础信息用于后续计算
                 wrapper.dataset.baseScale = baseScale;
                 wrapper.dataset.displayedWidth = displayedWidth;
                 wrapper.dataset.displayedHeight = displayedHeight;
@@ -4203,32 +5894,17 @@ class PanoramaManager(QMainWindow):
                 wrapper.dataset.offsetY = offsetY;
                 wrapper.dataset.imgNaturalWidth = imgNaturalWidth;
                 wrapper.dataset.imgNaturalHeight = imgNaturalHeight;
-                
-                // 添加标记点
                 renderMarkers(wrapper, floor.markers, offsetX, offsetY, displayedWidth, displayedHeight);
-                
-                // 添加缩放控件
                 addZoomControls(container);
-                
-                // 添加事件监听
                 addZoomEvents(wrapper, img, floor.markers);
-                
-                // 首次渲染扇形（只显示选中的点位）
                 renderSectors(wrapper, floor.markers, offsetX, offsetY, displayedWidth, displayedHeight, 1);
-                
-                // 加载影像
                 loadPanorama(0);
             };
-            
-            img.onerror = () => {
-                container.innerHTML = '<p style="color: #666;">平面图加载失败</p>';
-            };
+            img.onerror = () => { container.innerHTML = '<p style="color: #666;">平面图加载失败</p>'; };
         }
-        
+
         function renderMarkers(wrapper, markers, offsetX, offsetY, displayedWidth, displayedHeight) {
-            // 清除旧标记点
             wrapper.querySelectorAll('.marker-dot').forEach(dot => dot.remove());
-            
             markers.forEach((marker, idx) => {
                 const dot = document.createElement('div');
                 const statusClass = marker.status || 'pending';
@@ -4236,9 +5912,7 @@ class PanoramaManager(QMainWindow):
                 dot.dataset.markerX = marker.x;
                 dot.dataset.markerY = marker.y;
                 dot.dataset.markerIndex = idx;
-                
                 updateMarkerPosition(dot, offsetX, offsetY, displayedWidth, displayedHeight);
-                
                 dot.onclick = function(e) {
                     e.stopPropagation();
                     loadPanorama(idx);
@@ -4246,7 +5920,7 @@ class PanoramaManager(QMainWindow):
                 wrapper.appendChild(dot);
             });
         }
-        
+
         function updateMarkerPosition(dot, offsetX, offsetY, displayedWidth, displayedHeight) {
             const markerX = parseFloat(dot.dataset.markerX);
             const markerY = parseFloat(dot.dataset.markerY);
@@ -4255,44 +5929,26 @@ class PanoramaManager(QMainWindow):
             dot.style.left = leftPos + 'px';
             dot.style.top = topPos + 'px';
         }
-        
-        // ===== 扇形渲染函数 =====
+
         function renderSectors(wrapper, markers, offsetX, offsetY, displayedWidth, displayedHeight, scale) {
-            // 清除旧扇形
             wrapper.querySelectorAll('.sector-svg').forEach(s => s.remove());
-            
             const sectorAngle = 90;
             const radius = 30;
-            
-            // 只渲染当前选中的标记点的扇形
             markers.forEach((marker, idx) => {
-                // 只显示选中点位的扇形
                 if (idx !== currentMarkerIndex) return;
-                
-                // 确定扇形方向：优先使用全景同步方向，否则使用 marker.direction
                 let direction;
                 if (currentSectorDirection !== null) {
                     direction = currentSectorDirection;
                 } else if (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') {
                     direction = parseFloat(marker.direction);
-                } else {
-                    return;  // 没有有效方向，不渲染扇形
-                }
+                } else { return; }
                 const cx = offsetX + (marker.x * displayedWidth);
                 const cy = offsetY + (marker.y * displayedHeight);
-                
-                // 与管理器 render_direction_sectors 完全一致的计算逻辑
-                // direction: -90°=朝上(12点), 0°=朝右, 90°=朝下, ±180°=朝左
-                // 管理器: QPainterPath 角度从3点钟顺时针
-                // start_ang = -(ang + half) 其中 ang = direction
-                const ang = direction;  // 角度值（度）
+                const ang = direction;
                 const half = sectorAngle / 2;
-                const startAngDeg = -(ang + half);  // 起始角度（度）
-                
-                // 转为弧度（QPainterPath使用弧度，SVG也使用弧度）
+                const startAngDeg = -(ang + half);
                 const startAng = startAngDeg * Math.PI / 180;
                 const endAng = (startAngDeg + sectorAngle) * Math.PI / 180;
-                
                 const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
                 svg.classList.add('sector-svg');
                 svg.style.position = 'absolute';
@@ -4303,33 +5959,20 @@ class PanoramaManager(QMainWindow):
                 svg.style.pointerEvents = 'none';
                 svg.style.zIndex = '5';
                 svg.setAttribute('viewBox', '0 0 ' + wrapper.clientWidth + ' ' + wrapper.clientHeight);
-                
-                // 扇形路径 - 与管理器使用相同的计算方式
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const r = radius;
-                
-                // 计算左边界点（起始角度）
                 const leftRad = startAng;
                 const lx = cx + r * Math.cos(leftRad);
-                const ly = cy - r * Math.sin(leftRad);  // SVG y轴向下，管理器用 cy - r*sin
-                
-                // 计算右边界点（结束角度）
+                const ly = cy - r * Math.sin(leftRad);
                 const rightRad = endAng;
                 const rx = cx + r * Math.cos(rightRad);
                 const ry = cy - r * Math.sin(rightRad);
-                
-                // 构建路径：管理中心 -> 左边界 -> 弧线 -> 管理中心
-                const d = 'M ' + cx + ' ' + cy + 
-                          ' L ' + lx + ' ' + ly + 
-                          ' A ' + r + ' ' + r + ' 0 0 0 ' + rx + ' ' + ry + 
-                          ' Z';
-                
+                const d = 'M ' + cx + ' ' + cy + ' L ' + lx + ' ' + ly + ' A ' + r + ' ' + r + ' 0 0 0 ' + rx + ' ' + ry + ' Z';
                 path.setAttribute('d', d);
                 path.setAttribute('fill', 'rgba(0, 122, 255, 0.25)');
                 path.setAttribute('stroke', 'rgba(255, 255, 255, 0.7)');
                 path.setAttribute('stroke-width', '1');
                 svg.appendChild(path);
-                
                 wrapper.appendChild(svg);
             });
         }
@@ -4337,38 +5980,26 @@ class PanoramaManager(QMainWindow):
         function addZoomControls(container) {
             const controls = document.createElement('div');
             controls.className = 'zoom-controls';
-            controls.innerHTML = `
-                <button class="zoom-btn" onclick="zoomIn()" title="放大">+</button>
-                <button class="zoom-btn" onclick="zoomOut()" title="缩小">−</button>
-                <button class="zoom-btn zoom-reset" onclick="zoomReset()" title="重置">重置</button>
-            `;
+            controls.innerHTML = '<button class="zoom-btn" onclick="zoomIn()" title="放大">+</button><button class="zoom-btn" onclick="zoomOut()" title="缩小">−</button><button class="zoom-btn zoom-reset" onclick="zoomReset()" title="重置">重置</button>';
             container.appendChild(controls);
         }
-        
+
         function addZoomEvents(wrapper, img, markers) {
-            // 鼠标滚轮缩放
             wrapper.addEventListener('wheel', function(e) {
                 e.preventDefault();
-                
                 const rect = wrapper.getBoundingClientRect();
                 const mouseX = e.clientX - rect.left;
                 const mouseY = e.clientY - rect.top;
-                
                 const delta = e.deltaY > 0 ? 0.9 : 1.1;
                 const newScale = Math.max(0.5, Math.min(5, currentScale * delta));
-                
                 if (newScale !== currentScale) {
-                    // 以鼠标为中心缩放
                     const scaleRatio = newScale / currentScale;
                     currentOffsetX = mouseX - (mouseX - currentOffsetX) * scaleRatio;
                     currentOffsetY = mouseY - (mouseY - currentOffsetY) * scaleRatio;
                     currentScale = newScale;
-                    
                     applyTransform(wrapper, img, markers);
                 }
             }, { passive: false });
-            
-            // 拖拽平移
             wrapper.addEventListener('mousedown', function(e) {
                 if (e.target.classList.contains('marker-dot')) return;
                 isDragging = true;
@@ -4376,7 +6007,6 @@ class PanoramaManager(QMainWindow):
                 dragStartY = e.clientY - currentOffsetY;
                 wrapper.style.cursor = 'grabbing';
             });
-            
             document.addEventListener('mousemove', function(e) {
                 if (!isDragging) return;
                 e.preventDefault();
@@ -4384,38 +6014,25 @@ class PanoramaManager(QMainWindow):
                 currentOffsetY = e.clientY - dragStartY;
                 applyTransform(wrapper, img, markers);
             });
-            
             document.addEventListener('mouseup', function() {
                 isDragging = false;
                 wrapper.style.cursor = 'grab';
             });
-            
-            // 触摸缩放（双指）
             let initialTouchDistance = 0;
             let initialTouchCenter = null;
             let initialScale = 1;
             let initialOffsetX = 0;
             let initialOffsetY = 0;
-            
             wrapper.addEventListener('touchstart', function(e) {
                 if (e.touches.length === 2) {
                     e.preventDefault();
                     const touch1 = e.touches[0];
                     const touch2 = e.touches[1];
-                    
-                    // 记录初始状态
-                    initialTouchDistance = Math.hypot(
-                        touch2.clientX - touch1.clientX,
-                        touch2.clientY - touch1.clientY
-                    );
-                    initialTouchCenter = {
-                        x: (touch1.clientX + touch2.clientX) / 2,
-                        y: (touch1.clientY + touch2.clientY) / 2
-                    };
+                    initialTouchDistance = Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
+                    initialTouchCenter = { x: (touch1.clientX + touch2.clientX) / 2, y: (touch1.clientY + touch2.clientY) / 2 };
                     initialScale = currentScale;
                     initialOffsetX = currentOffsetX;
                     initialOffsetY = currentOffsetY;
-                    
                     lastTouchDistance = initialTouchDistance;
                     lastTouchCenter = initialTouchCenter;
                 } else if (e.touches.length === 1 && currentScale > 1) {
@@ -4424,43 +6041,25 @@ class PanoramaManager(QMainWindow):
                     dragStartY = e.touches[0].clientY - currentOffsetY;
                 }
             }, { passive: false });
-            
             wrapper.addEventListener('touchmove', function(e) {
                 if (e.touches.length === 2) {
                     e.preventDefault();
                     const touch1 = e.touches[0];
                     const touch2 = e.touches[1];
-                    
-                    // 当前两指距离
-                    const distance = Math.hypot(
-                        touch2.clientX - touch1.clientX,
-                        touch2.clientY - touch1.clientY
-                    );
-                    
-                    // 当前两指中心
-                    const currentCenter = {
-                        x: (touch1.clientX + touch2.clientX) / 2,
-                        y: (touch1.clientY + touch2.clientY) / 2
-                    };
-                    
+                    const distance = Math.hypot(touch2.clientX - touch1.clientX, touch2.clientY - touch1.clientY);
+                    const currentCenter = { x: (touch1.clientX + touch2.clientX) / 2, y: (touch1.clientY + touch2.clientY) / 2 };
                     if (initialTouchDistance > 0) {
-                        // 基于初始状态计算新缩放
                         const scaleDelta = distance / initialTouchDistance;
                         const newScale = Math.max(0.5, Math.min(5, initialScale * scaleDelta));
-                        
-                        // 以两指中心为基点缩放
                         const rect = wrapper.getBoundingClientRect();
                         const centerX = initialTouchCenter.x - rect.left;
                         const centerY = initialTouchCenter.y - rect.top;
-                        
                         const scaleRatio = newScale / initialScale;
                         currentOffsetX = centerX - (centerX - initialOffsetX) * scaleRatio;
                         currentOffsetY = centerY - (centerY - initialOffsetY) * scaleRatio;
                         currentScale = newScale;
-                        
                         applyTransform(wrapper, img, markers);
                     }
-                    
                     lastTouchDistance = distance;
                     lastTouchCenter = currentCenter;
                 } else if (e.touches.length === 1 && isDragging) {
@@ -4470,69 +6069,46 @@ class PanoramaManager(QMainWindow):
                     applyTransform(wrapper, img, markers);
                 }
             }, { passive: false });
-            
             wrapper.addEventListener('touchend', function() {
                 lastTouchDistance = 0;
                 lastTouchCenter = null;
                 isDragging = false;
             });
-            
-            // 双击重置
-            wrapper.addEventListener('dblclick', function() {
-                zoomReset();
-            });
+            wrapper.addEventListener('dblclick', function() { zoomReset(); });
         }
-        
+
         function applyTransform(wrapper, img, markers) {
-            // 应用变换到图片
             img.style.transform = 'translate(' + currentOffsetX + 'px, ' + currentOffsetY + 'px) scale(' + currentScale + ')';
-            
-            // 计算标记点的基础偏移（图片初始居中时的偏移）
             const baseOffsetX = parseFloat(wrapper.dataset.offsetX);
             const baseOffsetY = parseFloat(wrapper.dataset.offsetY);
             const displayedWidth = parseFloat(wrapper.dataset.displayedWidth);
             const displayedHeight = parseFloat(wrapper.dataset.displayedHeight);
-            
-            // 标记点位置 = 基础偏移 + 平移偏移 + (标记点相对位置 * 缩放后尺寸)
             wrapper.querySelectorAll('.marker-dot').forEach(dot => {
                 const markerX = parseFloat(dot.dataset.markerX);
                 const markerY = parseFloat(dot.dataset.markerY);
-                
-                // 计算标记点在缩放后的位置
                 const leftPos = baseOffsetX + currentOffsetX + (markerX * displayedWidth * currentScale);
                 const topPos = baseOffsetY + currentOffsetY + (markerY * displayedHeight * currentScale);
-                
                 dot.style.left = leftPos + 'px';
                 dot.style.top = topPos + 'px';
-                // 标记点大小不随缩放变化，保持可读性
                 dot.style.transform = 'translate(-50%, -50%)';
             });
-            
-            // 同步更新扇形
-            renderSectors(wrapper, markers, 
-                baseOffsetX + currentOffsetX, 
-                baseOffsetY + currentOffsetY,
-                displayedWidth * currentScale, 
-                displayedHeight * currentScale, 
-                currentScale);
+            renderSectors(wrapper, markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
         }
-        
+
         function zoomIn() {
             const wrapper = document.getElementById('floorplanWrapper');
             if (!wrapper) return;
             const img = document.getElementById('floorplanImg');
             const floor = floors[currentFloorIndex];
-            
             currentScale = Math.min(5, currentScale * 1.25);
             applyTransform(wrapper, img, floor.markers);
         }
-        
+
         function zoomOut() {
             const wrapper = document.getElementById('floorplanWrapper');
             if (!wrapper) return;
             const img = document.getElementById('floorplanImg');
             const floor = floors[currentFloorIndex];
-            
             currentScale = Math.max(0.5, currentScale / 1.25);
             if (currentScale < 1.01 && currentScale > 0.99) {
                 currentScale = 1;
@@ -4541,25 +6117,24 @@ class PanoramaManager(QMainWindow):
             }
             applyTransform(wrapper, img, floor.markers);
         }
-        
+
         function zoomReset() {
             const wrapper = document.getElementById('floorplanWrapper');
             if (!wrapper) return;
             const img = document.getElementById('floorplanImg');
             const floor = floors[currentFloorIndex];
-            
             currentScale = 1;
             currentOffsetX = 0;
             currentOffsetY = 0;
             applyTransform(wrapper, img, floor.markers);
         }
-        
+
         // 全局状态
         let isGyroEnabled = false;
         let isVREnabled = false;
         let vrViewerLeft = null;
         let vrViewerRight = null;
-        let viewMode = 'panorama'; // 'panorama' | 'photo'（默认全景）
+        let viewMode = 'panorama';
         let currentPhotoIndex = 0;
         let photoScale = 1;
         let photoOffsetX = 0;
@@ -4567,74 +6142,49 @@ class PanoramaManager(QMainWindow):
         let isPhotoDragging = false;
         let photoDragStartX = 0;
         let photoDragStartY = 0;
-        let currentSectorDirection = null; // 扇形当前方向（null=使用marker.direction, 非null=全景同步方向）
-        
+        let currentSectorDirection = null;
+
         function loadPanorama(index) {
             const floor = floors[currentFloorIndex];
             if (floor.markers.length === 0) return;
-            
             currentMarkerIndex = index;
             const marker = floor.markers[index];
-            
-            document.getElementById('current-title').textContent = 
-                marker.customName || marker.cameraFileName || '点位' + (index + 1);
+            document.getElementById('current-title').textContent = marker.customName || marker.cameraFileName || '点位' + (index + 1);
             document.getElementById('current-floor').textContent = floor.name;
-            
-            // 更新激活的标记点
             document.querySelectorAll('.marker-dot').forEach((dot, idx) => {
                 dot.classList.toggle('active', idx === index);
             });
-            
-            // 切换选中点位时重置扇形方向（使用新 marker 中的 direction 值）
-            // 先清空全景同步方向，让新点位的扇形使用自己的 direction
+            var roamInd2 = document.getElementById('roamIndicator');
+            if (roamInd2) roamInd2.style.display = 'none';
             currentSectorDirection = null;
-            
-            // 切换选中点位时更新扇形显示
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
                 const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
                 const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
                 const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
                 const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
-                renderSectors(wrapper, floor.markers, 
-                    baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY,
-                    displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                renderSectors(wrapper, floor.markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
             }
-            
-            // 如果该点位没有影像，显示提示并清空区域
             if (!marker.panoramaPath) {
                 if (viewer) viewer.destroy();
                 viewer = null;
-                document.getElementById('panorama').innerHTML = 
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:18px;">该点位暂无影像</div>';
+                document.getElementById('panorama').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666;font-size:18px;">该点位暂无影像</div>';
                 document.getElementById('panorama').style.display = 'block';
                 document.getElementById('photoViewer').classList.remove('active');
                 return;
             }
-            
-            // 如果 VR 模式已启用，重新加载 VR 视图
-            if (isVREnabled) {
-                loadVRView(marker);
-                return;
-            }
-            
-            // 确定展示模式 - 默认为全景模式
+            if (isVREnabled) { loadVRView(marker); return; }
             const photos = marker.photos || [marker.panoramaPath];
-            const photoCount = photos.length;
             let mode = viewMode;
-            if (mode === 'auto') {
-                // 默认使用全景模式
-                mode = 'panorama';
-            }
+            if (mode === 'auto') mode = 'panorama';
             updateViewModeUI(mode);
-            
             if (mode === 'panorama') {
                 showPanoramaViewer(marker, photos);
             } else {
                 showPhotoViewer(marker, photos);
             }
         }
-        
+
         function updateViewModeUI(mode) {
             const btn = document.getElementById('viewModeBtn');
             if (mode === 'panorama') {
@@ -4645,13 +6195,11 @@ class PanoramaManager(QMainWindow):
                 btn.classList.remove('active');
             }
         }
-        
+
         function toggleViewMode() {
             const floor = floors[currentFloorIndex];
             const marker = floor.markers[currentMarkerIndex];
             if (!marker.panoramaPath) return;
-            
-            // 在全景和图片模式之间切换
             if (viewMode === 'panorama') {
                 viewMode = 'photo';
             } else {
@@ -4659,10 +6207,23 @@ class PanoramaManager(QMainWindow):
             }
             loadPanorama(currentMarkerIndex);
         }
-        
+
         function showPanoramaViewer(marker, photos) {
             document.getElementById('panorama').style.display = 'block';
             document.getElementById('photoViewer').classList.remove('active');
+            
+            let prevYaw = 0, prevPitch = 0, prevHfov = 100;
+            if (viewer) {
+                try {
+                    prevYaw = viewer.getYaw();
+                    prevPitch = viewer.getPitch();
+                    prevHfov = viewer.getHfov();
+                } catch(e) {}
+            }
+            
+            const panoramaDiv = document.getElementById('panorama');
+            panoramaDiv.style.transition = 'opacity ' + (RoamConfig.fadeOutDuration / 1000) + 's ease';
+            panoramaDiv.style.opacity = '0.3';
             
             if (viewer) viewer.destroy();
             
@@ -4675,8 +6236,16 @@ class PanoramaManager(QMainWindow):
                 orientationOnByDefault: isGyroEnabled,
                 friction: 0.1,
                 mouseZoom: true,
-                draggable: true
+                draggable: true,
+                sceneFadeDuration: RoamConfig.fadeInDuration
             };
+            
+            if (window._preservedView && window._preservedView.yaw !== null) {
+                config.yaw = window._preservedView.yaw;
+                config.pitch = window._preservedView.pitch;
+                console.log('[智能朝向] 应用 preserved yaw:', config.yaw, 'pitch:', config.pitch);
+                window._preservedView = null;
+            }
             
             if (photos.length === 4) {
                 config.type = 'cubemap';
@@ -4686,16 +6255,28 @@ class PanoramaManager(QMainWindow):
                 config.panorama = photos[0];
             }
             
+            config.hotSpots = getRoamHotSpotsConfig(marker);
+            
             viewer = pannellum.viewer('panorama', config);
             
-            // 基准方向：来自管理器保存的值
+            setTimeout(() => {
+                panoramaDiv.style.opacity = '1';
+            }, 50);
+            
+            var indicator = document.getElementById('roamIndicator');
+            if (indicator) {
+                if (config.hotSpots && config.hotSpots.length > 0) {
+                    indicator.style.display = 'block';
+                } else {
+                    indicator.style.display = 'none';
+                }
+            }
+            
             let baseDirection = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') 
                 ? parseFloat(marker.direction) : -90;
             let initialYaw = null;
-            // 重置同步方向为 null，让 renderSectors 使用 marker.direction 渲染初始扇形
             currentSectorDirection = null;
             
-            // 初始渲染一次扇形（使用管理器设置的方向）
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
                 const floor = floors[currentFloorIndex];
@@ -4703,28 +6284,21 @@ class PanoramaManager(QMainWindow):
                 const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
                 const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
                 const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
-                renderSectors(wrapper, floor.markers, 
-                    baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY,
-                    displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                renderSectors(wrapper, floor.markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
             }
             
-            // 监听全景视角变化，基于基准方向进行偏移量同步
             const sendDirectionUpdate = (yaw) => {
                 if (initialYaw === null) {
-                    // 首次记录全景初始 yaw，不改变方向
                     initialYaw = yaw;
                     console.log('[全景] 初始视角 yaw:', yaw, '基准方向:', baseDirection);
                     return;
                 }
-                // 计算相对于初始视角的偏移量
                 let delta = yaw - initialYaw;
-                if (Math.abs(delta) < 1) return; // 微小变化忽略
+                if (Math.abs(delta) < 1) return;
                 let newDirection = baseDirection + delta;
-                // 标准化到 [-180, 180]
                 newDirection = ((newDirection + 180) % 360 + 360) % 360 - 180;
                 currentSectorDirection = newDirection;
                 
-                // 重新渲染扇形
                 const wrapper = document.getElementById('floorplanWrapper');
                 if (wrapper) {
                     const floor = floors[currentFloorIndex];
@@ -4732,29 +6306,24 @@ class PanoramaManager(QMainWindow):
                     const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
                     const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
                     const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
-                    renderSectors(wrapper, floor.markers, 
-                        baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY,
-                        displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                    renderSectors(wrapper, floor.markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
                 }
                 
-                // 同步到 PC 端
                 const currentMarker = floors[currentFloorIndex].markers[currentMarkerIndex];
                 if (currentMarker && currentMarker.id) {
-                // 发送最终计算出的方向（已标准化），而不是原始 yaw
-                let syncDir = ((newDirection + 180) % 360 + 360) % 360 - 180;
-                fetch(`/api/set_direction?marker_id=${encodeURIComponent(currentMarker.id)}&direction=${syncDir}`)
-                    .then(r => r.json())
-                    .then(data => console.log('[联动] 方向已同步:', data.direction))
-                    .catch(err => console.log('[联动] 同步失败:', err));
+                    let syncDir = ((newDirection + 180) % 360 + 360) % 360 - 180;
+                    fetch(`/api/set_direction?marker_id=${encodeURIComponent(currentMarker.id)}&direction=${syncDir}`)
+                        .then(r => r.json())
+                        .then(data => console.log('[联动] 方向已同步:', data.direction))
+                        .catch(err => console.log('[联动] 同步失败:', err));
                 }
             };
             
-            // 清理旧的同步 interval
             if (window._syncInterval) {
                 clearInterval(window._syncInterval);
                 window._syncInterval = null;
             }
-
+            
             window._syncInterval = setInterval(() => {
                 if (!viewer) { 
                     clearInterval(window._syncInterval); 
@@ -4773,13 +6342,23 @@ class PanoramaManager(QMainWindow):
                     catch(e) { console.log('启用陀螺仪控制:', e); }
                 }, 100);
             }
+            
+            if (RoamConfig.preloadEnabled) {
+                setTimeout(function() {
+                    PreloadManager.maxConcurrent = RoamConfig.maxConcurrent;
+                    PreloadManager.clear();
+                    PreloadManager.preloadForMarker(marker);
+                    if (RoamConfig.debugLog) console.log('[预加载] 已触发相邻场景预加载');
+                }, RoamConfig.preloadDelay);
+            }
         }
-        
+
         function showPhotoViewer(marker, photos) {
             document.getElementById('panorama').style.display = 'none';
             if (viewer) { viewer.destroy(); viewer = null; }
-            // 清理方向同步的 interval（通过全局变量）
             if (window._syncInterval) { clearInterval(window._syncInterval); window._syncInterval = null; }
+            var roamInd = document.getElementById('roamIndicator');
+            if (roamInd) roamInd.style.display = 'none';
             
             const photoViewer = document.getElementById('photoViewer');
             photoViewer.classList.add('active');
@@ -4789,7 +6368,7 @@ class PanoramaManager(QMainWindow):
             photoOffsetY = 0;
             renderPhoto(photos);
         }
-        
+
         function renderPhoto(photos) {
             const img = document.getElementById('photoImg');
             const prevBtn = document.getElementById('photoPrev');
@@ -4808,7 +6387,7 @@ class PanoramaManager(QMainWindow):
             counter.style.display = showNav ? 'block' : 'none';
             counter.textContent = (currentPhotoIndex + 1) + ' / ' + photos.length;
         }
-        
+
         function nextPhoto() {
             const floor = floors[currentFloorIndex];
             const marker = floor.markers[currentMarkerIndex];
@@ -4817,7 +6396,7 @@ class PanoramaManager(QMainWindow):
             currentPhotoIndex = (currentPhotoIndex + 1) % photos.length;
             renderPhoto(photos);
         }
-        
+
         function prevPhoto() {
             const floor = floors[currentFloorIndex];
             const marker = floor.markers[currentMarkerIndex];
@@ -4826,8 +6405,7 @@ class PanoramaManager(QMainWindow):
             currentPhotoIndex = (currentPhotoIndex - 1 + photos.length) % photos.length;
             renderPhoto(photos);
         }
-        
-        // 图片查看器缩放和拖动事件
+
         (function setupPhotoViewerEvents() {
             const viewerEl = document.getElementById('photoViewer');
             const img = document.getElementById('photoImg');
@@ -4861,7 +6439,6 @@ class PanoramaManager(QMainWindow):
                 img.style.cursor = 'grab';
             });
             
-            // 触摸支持
             img.addEventListener('touchstart', function(e) {
                 if (!viewerEl.classList.contains('active') || e.touches.length !== 1) return;
                 isPhotoDragging = true;
@@ -4889,21 +6466,17 @@ class PanoramaManager(QMainWindow):
                 img.style.transform = 'translate(0px, 0px) scale(1)';
             });
         })();
-        
-        // 切换陀螺仪模式
+
         function toggleGyro() {
             if (isGyroEnabled) {
-                // 关闭陀螺仪
                 isGyroEnabled = false;
                 document.getElementById('gyroBtn').classList.remove('active');
                 if (!isVREnabled) {
                     loadPanorama(currentMarkerIndex);
                 }
             } else {
-                // 开启陀螺仪 - iOS 13+ 需要显式请求权限, 必须在同步上下文调用
                 if (typeof DeviceOrientationEvent !== 'undefined' && 
                     typeof DeviceOrientationEvent.requestPermission === 'function') {
-                    // iOS 13+ 需要 HTTPS 环境
                     if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
                         alert('iOS 设备需要使用 HTTPS 连接才能启用陀螺仪功能。当前连接: ' + window.location.protocol + '//' + window.location.hostname);
                         return;
@@ -4924,13 +6497,11 @@ class PanoramaManager(QMainWindow):
                             alert('无法获取陀螺仪权限: ' + e.message + ' 请确保使用HTTPS连接并在iPhone设置中允许动作与方向访问');
                         });
                 } else {
-                    // Android 或其他浏览器直接启用
                     enableGyroMode();
                 }
             }
         }
-        
-        // 启用陀螺仪模式
+
         function enableGyroMode() {
             isGyroEnabled = true;
             const btn = document.getElementById('gyroBtn');
@@ -4940,21 +6511,17 @@ class PanoramaManager(QMainWindow):
             hint.classList.add('show');
             setTimeout(() => hint.classList.remove('show'), 3000);
             
-            // 重新加载当前影像以应用设置
             if (!isVREnabled) {
                 loadPanorama(currentMarkerIndex);
             }
         }
-        
-        // 切换 VR 模式
+
         function toggleVR() {
             if (isVREnabled) {
                 exitVR();
             } else {
-                // 进入 VR - iOS 13+ 需要显式请求权限，必须在同步上下文调用
                 if (typeof DeviceOrientationEvent !== 'undefined' && 
                     typeof DeviceOrientationEvent.requestPermission === 'function') {
-                    // iOS 13+ 需要 HTTPS 环境
                     if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
                         alert('iOS 设备需要使用 HTTPS 连接才能启用 VR 功能。当前连接: ' + window.location.protocol + '//' + window.location.hostname);
                         return;
@@ -4975,19 +6542,16 @@ class PanoramaManager(QMainWindow):
                             alert('无法获取陀螺仪权限: ' + e.message + ' 请确保使用HTTPS连接并在iPhone设置中允许动作与方向访问');
                         });
                 } else {
-                    // Android 或其他浏览器直接启用
                     startVRMode();
                 }
             }
         }
-        
-        // 启动 VR 模式
+
         function startVRMode() {
             isVREnabled = true;
             document.getElementById('vrBtn').classList.add('active');
             document.getElementById('vr-container').classList.add('active');
             
-            // 强制横屏
             if (screen.orientation && screen.orientation.lock) {
                 screen.orientation.lock('landscape').catch(err => {
                     console.log('无法锁定屏幕方向:', err);
@@ -5000,7 +6564,6 @@ class PanoramaManager(QMainWindow):
                 screen.msLockOrientation('landscape');
             }
             
-            // 进入全屏
             const elem = document.documentElement;
             if (elem.requestFullscreen) {
                 elem.requestFullscreen();
@@ -5010,15 +6573,12 @@ class PanoramaManager(QMainWindow):
                 elem.msRequestFullscreen();
             }
             
-            // 加载 VR 分屏视图
             const floor = floors[currentFloorIndex];
             const marker = floor.markers[currentMarkerIndex];
             loadVRView(marker);
         }
-        
-        // 加载 VR 分屏视图
+
         function loadVRView(marker) {
-            // 销毁旧的 VR 查看器
             if (vrViewerLeft) vrViewerLeft.destroy();
             if (vrViewerRight) vrViewerRight.destroy();
             
@@ -5044,7 +6604,6 @@ class PanoramaManager(QMainWindow):
                 baseConfig.panorama = photos[0];
             }
             
-            // 左眼视图（稍微向左偏移）
             vrViewerLeft = pannellum.viewer('vrLeft', {
                 ...baseConfig,
                 haov: 360,
@@ -5053,7 +6612,6 @@ class PanoramaManager(QMainWindow):
                 yaw: -5
             });
             
-            // 右眼视图（稍微向右偏移，模拟瞳距）
             vrViewerRight = pannellum.viewer('vrRight', {
                 ...baseConfig,
                 haov: 360,
@@ -5062,15 +6620,12 @@ class PanoramaManager(QMainWindow):
                 yaw: 5
             });
             
-            // 同步左右眼视角
             syncVREyes();
         }
-        
-        // 同步 VR 左右眼视角
+
         function syncVREyes() {
             if (!vrViewerLeft || !vrViewerRight) return;
             
-            // 监听设备方向变化来同步视角
             let lastYaw = 0;
             let lastPitch = 0;
             
@@ -5081,9 +6636,8 @@ class PanoramaManager(QMainWindow):
                     const leftYaw = vrViewerLeft.getYaw();
                     const leftPitch = vrViewerLeft.getPitch();
                     
-                    // 只有变化超过阈值时才更新，减少渲染负担
                     if (Math.abs(leftYaw - lastYaw) > 0.1 || Math.abs(leftPitch - lastPitch) > 0.1) {
-                        vrViewerRight.setYaw(leftYaw + 10, false);  // 保持瞳距偏移
+                        vrViewerRight.setYaw(leftYaw + 10, false);
                         vrViewerRight.setPitch(leftPitch, false);
                         lastYaw = leftYaw;
                         lastPitch = leftPitch;
@@ -5097,14 +6651,12 @@ class PanoramaManager(QMainWindow):
             
             syncView();
         }
-        
-        // 退出 VR 模式
+
         function exitVR() {
             isVREnabled = false;
             document.getElementById('vrBtn').classList.remove('active');
             document.getElementById('vr-container').classList.remove('active');
             
-            // 解锁屏幕方向
             if (screen.orientation && screen.orientation.unlock) {
                 screen.orientation.unlock();
             } else if (screen.unlockOrientation) {
@@ -5115,7 +6667,6 @@ class PanoramaManager(QMainWindow):
                 screen.msUnlockOrientation();
             }
             
-            // 销毁 VR 查看器
             if (vrViewerLeft) {
                 vrViewerLeft.destroy();
                 vrViewerLeft = null;
@@ -5125,7 +6676,6 @@ class PanoramaManager(QMainWindow):
                 vrViewerRight = null;
             }
             
-            // 退出全屏
             if (document.exitFullscreen) {
                 document.exitFullscreen();
             } else if (document.webkitExitFullscreen) {
@@ -5134,43 +6684,76 @@ class PanoramaManager(QMainWindow):
                 document.msExitFullscreen();
             }
             
-            // 恢复普通视图
             loadPanorama(currentMarkerIndex);
         }
-        
-        // 监听 ESC 键退出 VR
+
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape' && isVREnabled) {
                 exitVR();
             }
         });
-        
+
         function prevPanorama() {
             const floor = floors[currentFloorIndex];
             if (floor.markers.length === 0) return;
             
             let newIndex = currentMarkerIndex - 1;
             if (newIndex < 0) newIndex = floor.markers.length - 1;
+            
+            if (viewer && RoamConfig.smartOrientationEnabled) {
+                try {
+                    var currentMarker = floor.markers[currentMarkerIndex];
+                    var targetMarker = floor.markers[newIndex];
+                    var prevYaw = viewer.getYaw();
+                    var prevPitch = viewer.getPitch();
+                    var currentDir = (currentMarker.direction !== null && currentMarker.direction !== undefined)
+                        ? parseFloat(currentMarker.direction) : -90;
+                    var currentHeading = normalizeAngle(currentDir + 90);
+                    var userOffset = normalizeAngle(prevYaw - currentHeading);
+                    var moveAzimuth = getMoveAzimuth(currentMarker, targetMarker);
+                    window._preservedView = {
+                        yaw: normalizeAngle(moveAzimuth + 180 + userOffset),
+                        pitch: Math.max(-RoamConfig.pitchLimit, Math.min(RoamConfig.pitchLimit, prevPitch * RoamConfig.pitchDamping))
+                    };
+                } catch(e) {}
+            }
+            
             loadPanorama(newIndex);
         }
-        
+
         function nextPanorama() {
             const floor = floors[currentFloorIndex];
             if (floor.markers.length === 0) return;
             
             let newIndex = currentMarkerIndex + 1;
             if (newIndex >= floor.markers.length) newIndex = 0;
+            
+            if (viewer && RoamConfig.smartOrientationEnabled) {
+                try {
+                    var currentMarker = floor.markers[currentMarkerIndex];
+                    var targetMarker = floor.markers[newIndex];
+                    var prevYaw = viewer.getYaw();
+                    var prevPitch = viewer.getPitch();
+                    var currentDir = (currentMarker.direction !== null && currentMarker.direction !== undefined)
+                        ? parseFloat(currentMarker.direction) : -90;
+                    var currentHeading = normalizeAngle(currentDir + 90);
+                    var userOffset = normalizeAngle(prevYaw - currentHeading);
+                    var moveAzimuth = getMoveAzimuth(currentMarker, targetMarker);
+                    window._preservedView = {
+                        yaw: normalizeAngle(moveAzimuth + 180 + userOffset),
+                        pitch: Math.max(-RoamConfig.pitchLimit, Math.min(RoamConfig.pitchLimit, prevPitch * RoamConfig.pitchDamping))
+                    };
+                } catch(e) {}
+            }
+            
             loadPanorama(newIndex);
         }
-        
-        // 窗口大小改变时重新加载当前楼层（重新计算点位位置）
+
         let resizeTimer = null;
         window.addEventListener('resize', function() {
             clearTimeout(resizeTimer);
             resizeTimer = setTimeout(function() {
-                // 重新加载当前楼层以重新计算标记点位置
                 loadFloor(currentFloorIndex);
-                // 恢复当前选中的标记点状态
                 setTimeout(function() {
                     document.querySelectorAll('.marker-dot').forEach(function(dot, idx) {
                         dot.classList.toggle('active', idx === currentMarkerIndex);
@@ -5178,25 +6761,371 @@ class PanoramaManager(QMainWindow):
                 }, 100);
             }, 250);
         });
-        
+
+        // ========== 时空转换环系统（黑洞形态 + 透视变形） ==========
+        function getRoamHotSpotsConfig(marker) {
+            var C = RoamConfig;
+            if (!marker || !marker.roamHotSpots || marker.roamHotSpots.length === 0) {
+                return [];
+            }
+            var hotspots = marker.roamHotSpots || [];
+            // 数量限制：只显示最靠近的 N 个
+            if (C.maxVisibleHotspots > 0 && hotspots.length > C.maxVisibleHotspots) {
+                hotspots = hotspots.slice(0, C.maxVisibleHotspots);
+            }
+            return hotspots.map(function(hs) {
+                var pr = hs.perspectiveRatio || 0;
+
+                // 大小：向灭点方向透视缩小
+                var easedPr = Math.pow(pr, C.sizeCurve);
+                var baseSize = Math.round(C.sizeMax * (1 - easedPr) + C.sizeMin * easedPr);
+
+                // 透视变形：向灭点方向压缩（远处更扁，模拟地面透视）
+                var perspectiveCompress = 1 - pr * 0.4;
+                var ringHeight = Math.round(baseSize * perspectiveCompress);
+                var ringWidth = baseSize;
+
+                // 透明度
+                var opacityEased = Math.pow(pr, C.opacityCurve);
+                var opacity = C.opacityMax - opacityEased * (C.opacityMax - C.opacityMin);
+
+                // 颜色
+                var r = Math.round(C.colorNear[0] + pr * (C.colorFar[0] - C.colorNear[0]));
+                var g = Math.round(C.colorNear[1] + pr * (C.colorFar[1] - C.colorNear[1]));
+                var b = Math.round(C.colorNear[2] + pr * (C.colorFar[2] - C.colorNear[2]));
+                var ringColor = 'rgba(' + r + ', ' + g + ', ' + b + ', ' + opacity + ')';
+                var borderColor = 'rgba(255, 255, 255, ' + (C.borderOpacityNear - pr * (C.borderOpacityNear - C.borderOpacityFar)) + ')';
+
+                // 身后点处理
+                if (hs.isBehind) {
+                    baseSize = Math.round(baseSize * C.behindSizeScale);
+                    ringWidth = baseSize;
+                    ringHeight = Math.round(baseSize * perspectiveCompress);
+                    opacity *= C.behindOpacityScale;
+                    r = Math.round(r + (160 - r) * C.behindGrayScale);
+                    g = Math.round(g + (160 - g) * C.behindGrayScale);
+                    b = Math.round(b + (160 - b) * C.behindGrayScale);
+                    ringColor = 'rgba(' + r + ', ' + g + ', ' + b + ', ' + opacity + ')';
+                }
+
+                // CSS 类
+                var cssClass = 'roam-hotspot';
+                if (C.pulseEnabled && pr < C.pulseThreshold) {
+                    cssClass += ' pulse';
+                }
+                if (hs.isBehind) {
+                    cssClass += ' behind';
+                }
+
+                // 环厚度（随距离变细）
+                var ringThickness = Math.max(2, Math.round(4 * (1 - pr * 0.6)));
+
+                // 目标点位照片数量（决定环层数）
+                var targetPhotos = hs.photoCount || 1;
+                var maxRings = Math.min(targetPhotos, 3);
+
+                if (C.debugLog) {
+                    console.log('[时空环]', hs.targetName, 'pr=' + pr.toFixed(3), 'size=' + ringWidth + 'x' + ringHeight, 'rings=' + maxRings);
+                }
+
+                // 根据 vanishingPointPitch 配置实时计算 pitch
+                    var vanishingPitch = (C.vanishingPointPitch !== undefined) ? C.vanishingPointPitch : -15;
+                    var computedPitch = -85 + ((hs.perspectiveRatio || 0) * (vanishingPitch + 85));
+
+                    // 间距密度压缩：远处点视觉间距更小（向灭点方向聚集）
+                    var spacingDensity = (C.spacingDensity !== undefined) ? C.spacingDensity : 0.3;
+                    var visualYaw = hs.yaw * (1 - spacingDensity * (hs.perspectiveRatio || 0));
+
+                    return {
+                    pitch: computedPitch,
+                    yaw: visualYaw,
+                    type: 'info',
+                    clickHandlerFunc: function(e, args) {
+                        jumpToMarker(args.targetId);
+                    },
+                    clickHandlerArgs: { targetId: hs.targetId },
+                    cssClass: cssClass,
+                    // createTooltipFunc 在热点创建时和 hover 时都会触发
+                    // 这里设置热点本身的样式 + 添加 tooltip
+                    createTooltipFunc: function(hotSpotDiv, args) {
+                        // 设置热点容器大小和透视变形
+                        hotSpotDiv.style.width = args.ringWidth + 'px';
+                        hotSpotDiv.style.height = args.ringHeight + 'px';
+                        hotSpotDiv.style.minWidth = args.ringWidth + 'px';
+                        hotSpotDiv.style.minHeight = args.ringHeight + 'px';
+
+                        // 清空并重建内容（避免重复添加）
+                        hotSpotDiv.innerHTML = '';
+
+                        var style = args.hotspotStyle || 'blackhole';
+
+                        if (style === 'blackhole') {
+                            // ===== 样式A：黑洞环（多层同心圆环） =====
+                            for (var ri = 0; ri < args.maxRings; ri++) {
+                                var ring = document.createElement('div');
+                                ring.style.position = 'absolute';
+                                ring.style.top = '50%';
+                                ring.style.left = '50%';
+                                ring.style.transform = 'translate(-50%, -50%)';
+                                ring.style.borderRadius = '50%';
+                                ring.style.boxSizing = 'border-box';
+                                ring.style.pointerEvents = 'none';
+
+                                var scale = 1 + ri * 0.35;
+                                var rw = Math.round(args.ringWidth * scale);
+                                var rh = Math.round(args.ringHeight * scale);
+
+                                ring.style.width = rw + 'px';
+                                ring.style.height = rh + 'px';
+
+                                var th = Math.max(1, Math.round(args.ringThickness * (1 - ri * 0.15)));
+                                ring.style.border = th + 'px solid ' + args.ringColor;
+
+                                var ringOpacity = Math.max(0.2, 1 - ri * 0.25);
+                                ring.style.opacity = ringOpacity;
+
+                                // 外发光效果
+                                var glowColor = args.ringColor.replace(')', ', 0.3)').replace('rgba', 'rgba');
+                                ring.style.boxShadow = '0 0 ' + (8 + ri * 4) + 'px ' + glowColor + ', inset 0 2px 6px rgba(0,0,0,' + (0.7 - ri * 0.15) + ')';
+
+                                hotSpotDiv.appendChild(ring);
+                            }
+
+                            // 中心点（黑洞核心）
+                            var core = document.createElement('div');
+                            core.style.position = 'absolute';
+                            core.style.top = '50%';
+                            core.style.left = '50%';
+                            core.style.transform = 'translate(-50%, -50%)';
+                            core.style.width = Math.round(args.ringWidth * 0.25) + 'px';
+                            core.style.height = Math.round(args.ringHeight * 0.25) + 'px';
+                            core.style.borderRadius = '50%';
+                            core.style.background = 'radial-gradient(circle, rgba(0,0,0,0.9) 0%, rgba(20,20,25,0.6) 100%)';
+                            core.style.boxShadow = 'inset 0 1px 4px rgba(255,255,255,0.1), 0 0 10px rgba(0,0,0,0.5)';
+                            core.style.pointerEvents = 'none';
+                            hotSpotDiv.appendChild(core);
+
+                        } else if (style === 'pulse') {
+                            // ===== 样式B：脉冲光环（游戏任务标记风格） =====
+                            // 外环脉冲
+                            var pulseRing = document.createElement('div');
+                            pulseRing.className = 'pulse-ring';
+                            pulseRing.style.position = 'absolute';
+                            pulseRing.style.top = '50%';
+                            pulseRing.style.left = '50%';
+                            pulseRing.style.transform = 'translate(-50%, -50%)';
+                            pulseRing.style.width = Math.round(args.ringWidth * 2.5) + 'px';
+                            pulseRing.style.height = Math.round(args.ringHeight * 2.5) + 'px';
+                            pulseRing.style.borderRadius = '50%';
+                            pulseRing.style.border = '2px solid ' + args.ringColor;
+                            pulseRing.style.opacity = '0.6';
+                            pulseRing.style.pointerEvents = 'none';
+                            pulseRing.style.animation = 'hotspotPulse 2s ease-out infinite';
+                            hotSpotDiv.appendChild(pulseRing);
+
+                            // 中环
+                            var midRing = document.createElement('div');
+                            midRing.style.position = 'absolute';
+                            midRing.style.top = '50%';
+                            midRing.style.left = '50%';
+                            midRing.style.transform = 'translate(-50%, -50%)';
+                            midRing.style.width = Math.round(args.ringWidth * 1.6) + 'px';
+                            midRing.style.height = Math.round(args.ringHeight * 1.6) + 'px';
+                            midRing.style.borderRadius = '50%';
+                            midRing.style.border = '2px solid ' + args.ringColor;
+                            midRing.style.opacity = '0.4';
+                            midRing.style.pointerEvents = 'none';
+                            midRing.style.animation = 'hotspotPulse 2s ease-out 0.5s infinite';
+                            hotSpotDiv.appendChild(midRing);
+
+                            // 核心实心圆
+                            var core = document.createElement('div');
+                            core.style.position = 'absolute';
+                            core.style.top = '50%';
+                            core.style.left = '50%';
+                            core.style.transform = 'translate(-50%, -50%)';
+                            core.style.width = args.ringWidth + 'px';
+                            core.style.height = args.ringHeight + 'px';
+                            core.style.borderRadius = '50%';
+                            core.style.background = args.ringColor;
+                            core.style.opacity = '0.85';
+                            core.style.boxShadow = '0 0 20px ' + args.ringColor.replace(')', ', 0.5)').replace('rgba', 'rgba');
+                            core.style.pointerEvents = 'none';
+                            hotSpotDiv.appendChild(core);
+
+                            // 中心箭头指示
+                            var arrow = document.createElement('div');
+                            arrow.innerHTML = '▼';
+                            arrow.style.position = 'absolute';
+                            arrow.style.top = '50%';
+                            arrow.style.left = '50%';
+                            arrow.style.transform = 'translate(-50%, -50%)';
+                            arrow.style.color = 'white';
+                            arrow.style.fontSize = Math.round(args.ringWidth * 0.5) + 'px';
+                            arrow.style.textShadow = '0 0 4px rgba(0,0,0,0.8)';
+                            arrow.style.pointerEvents = 'none';
+                            arrow.style.lineHeight = '1';
+                            hotSpotDiv.appendChild(arrow);
+
+                        } else if (style === 'arrow') {
+                            // ===== 样式C：箭头指引（3D指向效果） =====
+                            // 轨迹线
+                            var trail = document.createElement('div');
+                            trail.style.position = 'absolute';
+                            trail.style.top = '50%';
+                            trail.style.left = '50%';
+                            trail.style.width = '2px';
+                            trail.style.height = Math.round(args.ringHeight * 1.5) + 'px';
+                            trail.style.background = 'linear-gradient(to bottom, ' + args.ringColor + ', transparent)';
+                            trail.style.transform = 'translate(-50%, -100%)';
+                            trail.style.opacity = '0.6';
+                            trail.style.pointerEvents = 'none';
+                            hotSpotDiv.appendChild(trail);
+
+                            // 箭头主体
+                            var arrowBody = document.createElement('div');
+                            arrowBody.style.position = 'absolute';
+                            arrowBody.style.top = '50%';
+                            arrowBody.style.left = '50%';
+                            arrowBody.style.transform = 'translate(-50%, -50%)';
+                            arrowBody.style.width = '0';
+                            arrowBody.style.height = '0';
+                            arrowBody.style.borderLeft = Math.round(args.ringWidth * 0.6) + 'px solid transparent';
+                            arrowBody.style.borderRight = Math.round(args.ringWidth * 0.6) + 'px solid transparent';
+                            arrowBody.style.borderBottom = Math.round(args.ringHeight * 0.8) + 'px solid ' + args.ringColor;
+                            arrowBody.style.opacity = '0.85';
+                            arrowBody.style.filter = 'drop-shadow(0 0 8px ' + args.ringColor.replace(')', ', 0.6)').replace('rgba', 'rgba') + ')';
+                            arrowBody.style.pointerEvents = 'none';
+                            arrowBody.style.animation = 'arrowBounce 1.5s ease-in-out infinite';
+                            hotSpotDiv.appendChild(arrowBody);
+
+                            // 底部圆点（落点标记）
+                            var dot = document.createElement('div');
+                            dot.style.position = 'absolute';
+                            dot.style.top = '50%';
+                            dot.style.left = '50%';
+                            dot.style.transform = 'translate(-50%, -50%)';
+                            dot.style.width = Math.round(args.ringWidth * 0.3) + 'px';
+                            dot.style.height = Math.round(args.ringHeight * 0.3) + 'px';
+                            dot.style.borderRadius = '50%';
+                            dot.style.background = 'white';
+                            dot.style.boxShadow = '0 0 10px ' + args.ringColor;
+                            dot.style.pointerEvents = 'none';
+                            hotSpotDiv.appendChild(dot);
+                        }
+
+                        // 点位名称显示控制
+                        // showName=true: 常驻显示自定义 label
+                        // showName=false: 不显示任何文字（纯转换点）
+                        if (C.showName && args.text) {
+                            var label = document.createElement('span');
+                            label.className = 'marker-label';
+                            label.textContent = args.text;
+                            label.style.display = 'block';
+                            label.style.opacity = '0.9';
+                            hotSpotDiv.appendChild(label);
+                        }
+                        // 不创建 Pannellum 默认 tooltip，避免重复或不需要的文字显示
+                    },
+                    createTooltipArgs: {
+                        ringWidth: ringWidth,
+                        ringHeight: ringHeight,
+                        ringThickness: ringThickness,
+                        ringColor: ringColor,
+                        text: hs.targetName,
+                        maxRings: maxRings,
+                        showName: C.showName,
+                        hotspotStyle: C.hotspotStyle
+                    },
+                    scale: true,
+                    text: hs.targetName
+                };
+            });
+        }
+function jumpToMarker(targetId) {
+            var targetFloorIdx = -1, targetMarkerIdx = -1;
+            var targetMarker = null;
+            for (var fIdx = 0; fIdx < floors.length; fIdx++) {
+                var floor = floors[fIdx];
+                for (var mIdx = 0; mIdx < floor.markers.length; mIdx++) {
+                    if (floor.markers[mIdx].id === targetId) {
+                        targetFloorIdx = fIdx;
+                        targetMarkerIdx = mIdx;
+                        targetMarker = floor.markers[mIdx];
+                        break;
+                    }
+                }
+                if (targetMarker) break;
+            }
+
+            if (!targetMarker) return;
+
+            var preservedYaw = null;
+            var preservedPitch = null;
+
+            if (RoamConfig.smartOrientationEnabled && viewer && currentMarkerIndex >= 0) {
+                try {
+                    var currentMarker = floors[currentFloorIndex].markers[currentMarkerIndex];
+                    var prevYaw = viewer.getYaw();
+                    var prevPitch = viewer.getPitch();
+                    
+                    var currentDir = (currentMarker.direction !== null && currentMarker.direction !== undefined)
+                        ? parseFloat(currentMarker.direction) : -90;
+                    var currentHeading = normalizeAngle(currentDir + 90);
+                    var userOffset = normalizeAngle(prevYaw - currentHeading);
+                    var moveAzimuth = getMoveAzimuth(currentMarker, targetMarker);
+                    
+                    preservedYaw = normalizeAngle(moveAzimuth + 180 + userOffset);
+                    preservedPitch = Math.max(-RoamConfig.pitchLimit, Math.min(RoamConfig.pitchLimit, prevPitch * RoamConfig.pitchDamping));
+                    
+                    if (RoamConfig.debugLog) {
+                        console.log('[智能朝向] 当前heading:', currentHeading.toFixed(1), 
+                                    '用户偏移:', userOffset.toFixed(1),
+                                    '移动方位:', moveAzimuth.toFixed(1),
+                                    '新yaw:', preservedYaw.toFixed(1));
+                    }
+                } catch(e) {
+                    if (RoamConfig.debugLog) console.log('[智能朝向] 计算失败:', e);
+                }
+            }
+
+            window._preservedView = { yaw: preservedYaw, pitch: preservedPitch };
+
+            if (targetFloorIdx !== currentFloorIndex) {
+                switchFloor(targetFloorIdx);
+            }
+
+            setTimeout(function(idx) {
+                return function() { loadPanorama(idx); };
+            }(targetMarkerIdx), 150);
+        }
+
+        function toggleRoamSettings() {
+            var panel = document.getElementById('roamSettingsPanel');
+            var btn = document.getElementById('roamSettingsBtn');
+            if (panel.style.display === 'none' || !panel.style.display) {
+                panel.style.display = 'block';
+                btn.classList.add('active');
+                syncUIFromConfig();
+            } else {
+                panel.style.display = 'none';
+                btn.classList.remove('active');
+            }
+        }
+
         // 启动
         init();
     </script>
-    <!-- 生成的查看器底部 -->
     <div class="brand-footer">
         <span>由 随心系统 生成</span>
         <a href="https://github.com/huangkeqi-cmd/suixi-system">了解更多</a>
     </div>
 </body>
 </html>'''
-        
-        # 使用 replace 方法替换占位符，避免与 JS 代码中的花括号冲突
+
+        # 使用 replace 方法替换占位符
         html_content = html_content.replace('__FLOORS_JSON__', floors_json if floors_json else '[]')
         html_content = html_content.replace('__PROJECT_NAME__', project_name if project_name else '未命名项目')
-        
-        # 调试：检查替换结果
-        if '__FLOORS_JSON__' in html_content or '__PROJECT_NAME__' in html_content:
-            print("[警告] 占位符未被正确替换!")
         
         with open(os.path.join(viewer_dir, 'index.html'), 'w', encoding='utf-8') as f:
             f.write(html_content)
@@ -5244,7 +7173,9 @@ class PanoramaManager(QMainWindow):
                 for _ in range(5):
                     try:
                         import urllib.request
-                        test_url = f"http://127.0.0.1:{port}/"
+                        # 使用实际分配的端口（port=0时会自动分配）
+                        actual_port = getattr(self.server_thread, 'actual_port', port) or port
+                        test_url = f"http://127.0.0.1:{actual_port}/"
                         req = urllib.request.Request(test_url, method='HEAD')
                         req.add_header('User-Agent', 'PanoramaManager/1.0')
                         with urllib.request.urlopen(req, timeout=1.0) as resp:
@@ -5392,6 +7323,7 @@ class PanoramaManager(QMainWindow):
         """采集点被拖动后更新坐标数据"""
         if not self.project_data:
             return
+        self._push_history()
         for floor_data in self.project_data.floors:
             for marker_data in floor_data.get('markers', []):
                 if marker_data['id'] == marker_id:
@@ -5416,6 +7348,8 @@ class PanoramaManager(QMainWindow):
         if not self.project_data or not self.current_floor_id:
             QMessageBox.warning(self, "提示", "请先加载项目并选择楼层")
             return
+        self._push_history()
+        self._record_command('_on_marker_add_requested', norm_x, norm_y)
         # 生成新ID
         new_id = 'm' + str(int(datetime.now().timestamp() * 1000))
         for floor_data in self.project_data.floors:
@@ -5461,10 +7395,10 @@ class PanoramaManager(QMainWindow):
         try:
             menu = QMenu(self)
             
-            relink_action = QAction("📷 重新关联照片", self)
-            delete_action = QAction("🗑️ 删除采集点", self)
-            sector_action = QAction("🔍 显示/隐藏所有扇形", self)
-            adjust_action = QAction("✏️ 调整基准方向模式", self)
+            relink_action = QAction("重新关联单点照片", self)
+            delete_action = QAction("删除采集点", self)
+            sector_action = QAction("显示/隐藏单点扇形", self)
+            adjust_action = QAction("调整单点扇形视线方向", self)
             
             menu.addAction(relink_action)
             menu.addAction(delete_action)
@@ -5476,7 +7410,7 @@ class PanoramaManager(QMainWindow):
             # 使用 triggered.connect 方式连接信号
             relink_action.triggered.connect(lambda: self._relink_marker_photo(marker_id))
             delete_action.triggered.connect(lambda: self._delete_marker(marker_id))
-            sector_action.triggered.connect(lambda: self._toggle_sector())
+            sector_action.triggered.connect(lambda: self._toggle_sector(marker_id))
             adjust_action.triggered.connect(lambda: self._toggle_adjust_mode(marker_id))
             
             # 转换为 QPoint
@@ -5610,6 +7544,7 @@ class PanoramaManager(QMainWindow):
     def _toggle_adjust_mode(self, marker_id: str):
         """切换调整模式：鼠标绕采集点中心旋转扇形，双击确认退出"""
         self._adjust_mode = getattr(self, '_adjust_mode', False)
+        self._record_command('_toggle_adjust_mode', marker_id)
         
         self._adjust_mode = not self._adjust_mode
         
@@ -5636,18 +7571,16 @@ class PanoramaManager(QMainWindow):
             self.canvas._adjust_mode = True
             self.canvas._adjust_marker_id = marker_id
             
-            QMessageBox.information(self, "调整模式", 
-                "已进入扇形视线调整模式。\n\n"
-                "移动鼠标：绕采集点中心旋转扇形方向。\n"
-                "双击平面：确认当前角度并退出编辑状态。\n"
-                "也可以使用「↺ 左转」/「右转 ↻」按钮调整。\n\n"
-                "确认后，浏览器旋转全景图时将以此新基准为准同步旋转。")
+            self.import_status_label.setText(
+                "🔧 调整模式：移动鼠标旋转扇形方向 | 双击平面确认退出 | 也可使用「↺ 左转」/「右转 ↻」按钮"
+            )
         else:
             # 退出调整模式
             self._exit_adjust_mode()
     
     def _exit_adjust_mode(self):
         """退出调整模式 - 确认当前扇形方向为新的默认方向"""
+        self._push_history()
         self._adjust_mode = False
         self.import_status_label.setText("就绪")
         self.rotate_left_btn.setStyleSheet("""
@@ -5705,11 +7638,11 @@ class PanoramaManager(QMainWindow):
         self.canvas._adjust_mode = False
         self.canvas._adjust_marker_id = None
         
-        # 给出明确的完成提示
+        # 给出完成提示（悬浮文字，无需确认）
         if saved:
-            QMessageBox.information(self, "完成", f"已确认扇形视线角度并保存到项目。")
+            self.import_status_label.setText("✅ 扇形方向已保存到项目")
         else:
-            QMessageBox.information(self, "完成", "已确认扇形视线角度并退出编辑状态。")
+            self.import_status_label.setText("✅ 已确认扇形视线角度")
 
     def _toggle_server_info(self):
         """切换服务器信息的显示/隐藏"""
@@ -5733,8 +7666,14 @@ class PanoramaManager(QMainWindow):
                 child.setVisible(checked)
 
     def _toggle_sector(self, marker_id: str = None):
-        """切换所有点位的扇形视线范围显示"""
-        # 判断当前状态：如果已有扇形显示，则全部关闭；否则全部开启
+        """切换单个或所有点位的扇形视线范围显示
+        
+        如果传入了 marker_id，则只切换该点位的扇形显示/隐藏（局部模式）。
+        如果 marker_id 为 None，则切换全局所有点位的扇形显示/隐藏（全局模式）。
+        """
+        if not self.project_data or not self.current_floor_id:
+            return
+        
         current_floor_data = None
         for f in self.project_data.floors:
             if f['id'] == self.current_floor_id:
@@ -5744,28 +7683,64 @@ class PanoramaManager(QMainWindow):
         if not current_floor_data:
             return
         
-        # 检查是否已有扇形显示（通过检查 scene 中是否有 sector 项）
-        has_sectors = False
-        for item in self.canvas.scene.items():
-            if isinstance(item, QGraphicsPathItem) and item.data(0) and str(item.data(0)).endswith('_sector'):
-                has_sectors = True
-                break
+        self._push_history()
+        self._record_command('_toggle_sector')
         
-        if has_sectors:
-            # 全部关闭：将所有有 direction 的点位设为 None（保留原值在临时存储中）
+        if marker_id:
+            # === 局部模式：只切换指定点位的扇形 ===
+            target_marker = None
             for marker_data in current_floor_data.get('markers', []):
-                if marker_data.get('direction') is not None:
-                    marker_data['_prev_direction'] = marker_data['direction']
-                    marker_data['direction'] = None
+                if marker_data['id'] == marker_id:
+                    target_marker = marker_data
+                    break
+            
+            if not target_marker:
+                return
+            
+            # 检查该点位当前是否有扇形显示（direction 不为 None 表示有扇形）
+            current_direction = target_marker.get('direction')
+            
+            if current_direction is not None:
+                # 当前有扇形，隐藏它：保存当前值到 _prev_direction，设为 None
+                target_marker['_prev_direction'] = current_direction
+                target_marker['direction'] = None
+            else:
+                # 当前无扇形，显示它：恢复 _prev_direction 或默认 -90
+                prev = target_marker.pop('_prev_direction', None)
+                target_marker['direction'] = prev if prev is not None else -90.0
+            
+            # 只刷新该点位的椭圆 item 的 direction 数据，不重建整个画布
+            item = self.canvas.marker_items.get(marker_id)
+            if item:
+                item.setData(2, target_marker['direction'])
+            
+            # 局部重绘扇形（只清除和重绘扇形，不动标记点）
+            self.canvas.render_direction_sectors()
         else:
-            # 全部开启：恢复之前保存的值，或设为默认值 -90
-            for marker_data in current_floor_data.get('markers', []):
-                prev = marker_data.pop('_prev_direction', None)
-                marker_data['direction'] = prev if prev is not None else -90.0
+            # === 全局模式：切换所有点位的扇形（原有逻辑）===
+            # 检查是否已有扇形显示（通过检查 scene 中是否有 sector 项）
+            has_sectors = False
+            for item in self.canvas.scene.items():
+                if isinstance(item, QGraphicsPathItem) and item.data(0) and str(item.data(0)).endswith('_sector'):
+                    has_sectors = True
+                    break
+            
+            if has_sectors:
+                # 全部关闭：将所有有 direction 的点位设为 None（保留原值在临时存储中）
+                for marker_data in current_floor_data.get('markers', []):
+                    if marker_data.get('direction') is not None:
+                        marker_data['_prev_direction'] = marker_data['direction']
+                        marker_data['direction'] = None
+            else:
+                # 全部开启：恢复之前保存的值，或设为默认值 -90
+                for marker_data in current_floor_data.get('markers', []):
+                    prev = marker_data.pop('_prev_direction', None)
+                    marker_data['direction'] = prev if prev is not None else -90.0
+            
+            self.canvas.clear_markers()
+            self._load_floor(self.current_floor_id)
+            self.canvas.render_direction_sectors()
         
-        self.canvas.clear_markers()
-        self._load_floor(self.current_floor_id)
-        self.canvas.render_direction_sectors()
         self.save_changes_btn.setStyleSheet("""
             QPushButton {
                 padding: 6px 12px; font-size: 13px;
@@ -5784,6 +7759,7 @@ class PanoramaManager(QMainWindow):
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
+        self._push_history()
         for floor_data in self.project_data.floors:
             markers = floor_data.get('markers', [])
             for i, m in enumerate(markers):
@@ -5807,6 +7783,8 @@ class PanoramaManager(QMainWindow):
         """重新关联照片到采集点"""
         if not self.project_dir:
             return
+        self._push_history()
+        self._record_command('_relink_marker_photo', marker_id)
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择照片文件", self.project_dir,
             "图片文件 (*.jpg *.jpeg *.png *.heic *.heif);;所有文件 (*.*)"
@@ -5876,7 +7854,7 @@ class PanoramaManager(QMainWindow):
             return
         photo_base_dir = self._find_photo_base_dir()
         dialog = PhotoPickerDialog(photo_base_dir, self.current_marker.id, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        if dialog.exec(): 
             selected_path = dialog.selected_path
             if selected_path:
                 self._link_photo_to_marker(self.current_marker.id, selected_path)
@@ -5885,6 +7863,8 @@ class PanoramaManager(QMainWindow):
         """将照片关联到指定点位"""
         fname = os.path.basename(file_path)
         photo_base_dir = self._find_photo_base_dir()
+        self._push_history()
+        self._record_command('_link_photo_to_marker', marker_id, file_path)
         # 如果 photoBaseDir 不存在（或为空），创建项目目录下的 photos 文件夹
         if not photo_base_dir or not os.path.exists(photo_base_dir):
             photo_base_dir = os.path.join(self.project_dir, 'photos')
@@ -5977,6 +7957,8 @@ class PanoramaManager(QMainWindow):
         """旋转当前选中标记点的扇形方向"""
         if not hasattr(self, 'current_marker') or not self.current_marker:
             return
+        self._push_history()
+        self._record_command('_rotate_sector', angle_delta)
         
         marker_id = self.current_marker.id
         
@@ -5997,8 +7979,6 @@ class PanoramaManager(QMainWindow):
                     
                     # 更新显示
                     self.direction_label.setText(f"{new_dir:.0f}°")
-                    
-                    # 更新当前标记点
                     self.current_marker.direction = new_dir
                     
                     # 标记已修改
@@ -6025,6 +8005,8 @@ class PanoramaManager(QMainWindow):
         """将扇形方向对齐到全景照片的当前视角"""
         if not hasattr(self, 'current_marker') or not self.current_marker:
             return
+        self._push_history()
+        self._record_command('_align_to_panorama')
         
         # 弹出对话框让用户输入全景的当前视角
         current_yaw, ok = QInputDialog.getDouble(
@@ -6105,15 +8087,18 @@ class PanoramaManager(QMainWindow):
         """从右侧删除当前选中的点位"""
         if not hasattr(self, 'current_marker') or not self.current_marker:
             return
+        self._record_command('_delete_current_marker')
         self._delete_marker(self.current_marker.id)
         self.marker_info_group.setEnabled(False)
+        self._update_floating_toolbar()
+        self.canvas.clear_hover()
 
     def _on_marker_double_clicked(self, marker_id: str):
         """双击点位 - 如果处于调整模式则确认退出，否则替换照片"""
         # 如果是调整模式确认信号
         if marker_id == '__ADJUST_MODE_CONFIRM__':
             self._exit_adjust_mode()
-            QMessageBox.information(self, "完成", "已确认扇形视线角度并退出编辑状态。")
+            self.import_status_label.setText("✅ 已确认扇形视线角度")
             return
         
         # 正常双击：替换照片
@@ -6124,6 +8109,72 @@ class PanoramaManager(QMainWindow):
         )
         if file_path:
             self._link_photo_to_marker(marker_id, file_path)
+
+    def _on_marker_context_menu(self, marker_id: str, global_pos):
+        """采集点右键菜单"""
+        try:
+            menu = QMenu(self)
+            
+            relink_action = QAction("重新关联单点照片", self)
+            delete_action = QAction("删除采集点", self)
+            sector_action = QAction("显示/隐藏单点扇形", self)
+            adjust_action = QAction("调整单点扇形视线方向", self)
+            set_all_action = QAction("调整所有点扇形视线方向", self)
+            
+            menu.addAction(relink_action)
+            menu.addAction(delete_action)
+            menu.addSeparator()
+            menu.addAction(sector_action)
+            menu.addSeparator()
+            menu.addAction(adjust_action)
+            menu.addAction(set_all_action)
+            
+            relink_action.triggered.connect(lambda: self._relink_marker_photo(marker_id))
+            delete_action.triggered.connect(lambda: self._delete_marker(marker_id))
+            sector_action.triggered.connect(lambda: self._toggle_sector(marker_id))
+            adjust_action.triggered.connect(lambda: self._toggle_adjust_mode(marker_id))
+            set_all_action.triggered.connect(self._set_all_sectors_direction)
+            
+            pos = global_pos.toPoint() if isinstance(global_pos, QPointF) else global_pos
+            menu.exec(pos)
+        except Exception as e:
+            print(f"[错误] 右键菜单异常: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _set_all_sectors_direction(self):
+        """统一设置当前楼层所有扇形方向"""
+        if not self.project_data or not self.current_floor_id:
+            return
+        self._push_history()
+        self._record_command('_set_all_sectors_direction')
+        angle, ok = QInputDialog.getDouble(
+            self, "调整全部方向",
+            "请输入固定角度（度）:\n-90=朝上, 0=朝右, 90=朝下, ±180=朝左",
+            value=-90, min=-180, max=180, decimals=1
+        )
+        if not ok:
+            return
+        # 应用到当前楼层所有标记点
+        for floor_data in self.project_data.floors:
+            if floor_data['id'] == self.current_floor_id:
+                for marker_data in floor_data.get('markers', []):
+                    marker_data['direction'] = float(angle)
+                break
+        # 刷新显示
+        self.canvas.clear_markers()
+        self._load_floor(self.current_floor_id)
+        self.canvas.render_direction_sectors()
+        # 标记已修改
+        self.save_changes_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px; font-size: 13px;
+                background-color: #FF9500; color: white;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #B36800; }
+        """)
+        self.save_changes_btn.setText("💾 保存修改（已变更）")
 
     def _save_project_changes(self):
         """保存项目修改到 project.json"""
@@ -6260,7 +8311,7 @@ class PanoramaManager(QMainWindow):
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 v1.1</h2>
+            """<h2>随系 · 影像管理器 V1.5</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>""")
@@ -6463,6 +8514,129 @@ class PhotoPickerDialog(QDialog):
         self._update_preview()
 
 
+class ShortcutDialog(QDialog):
+    def __init__(self, shortcuts, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("快捷键设置")
+        self.resize(400, 350)
+        self._shortcuts = dict(shortcuts)
+        self._init_ui()
+    
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        
+        hint = QLabel("提示：留空表示不设置快捷键。格式如 Delete、Ctrl+Z、Space、Ctrl+Shift+A")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 12px; padding-bottom: 8px;")
+        layout.addWidget(hint)
+        
+        self.table = QTableWidget(len(self._shortcuts), 2)
+        self.table.setHorizontalHeaderLabels(["功能", "快捷键"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        
+        actions = {
+            'delete': '删除当前点位',
+            'undo': '撤销',
+            'redo': '重做',
+            'repeat': '重复上一个命令',
+            'relink': '重新关联单点照片',
+            'toggle_sector': '显示/隐藏全部扇形',
+            'adjust_mode': '调整单点扇形视线方向',
+            'set_all_direction': '调整全部方向',
+            'align_panorama': '对齐全景',
+            'rotate_left': '扇形左转',
+            'rotate_right': '扇形右转',
+        }
+        
+        for i, (action, key) in enumerate(self._shortcuts.items()):
+            name_item = QTableWidgetItem(actions.get(action, action))
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(i, 0, name_item)
+            
+            key_item = QTableWidgetItem(key)
+            key_item.setFlags(key_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(i, 1, key_item)
+        
+        layout.addWidget(self.table)
+        
+        btn_layout = QHBoxLayout()
+        export_btn = QPushButton("📤 导出配置")
+        export_btn.clicked.connect(self._export)
+        import_btn = QPushButton("📥 导入配置")
+        import_btn.clicked.connect(self._import)
+        reset_btn = QPushButton("🔄 恢复默认")
+        reset_btn.clicked.connect(self._reset_default)
+        btn_layout.addWidget(export_btn)
+        btn_layout.addWidget(import_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(reset_btn)
+        layout.addLayout(btn_layout)
+        
+        ok_cancel = QHBoxLayout()
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        ok_cancel.addStretch()
+        ok_cancel.addWidget(ok_btn)
+        ok_cancel.addWidget(cancel_btn)
+        layout.addLayout(ok_cancel)
+    
+    def get_shortcuts(self):
+        result = {}
+        for i in range(self.table.rowCount()):
+            action = list(self._shortcuts.keys())[i]
+            key = self.table.item(i, 1).text().strip()
+            result[action] = key
+        return result
+    
+    def _export(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出快捷键配置", "shortcuts.json", "JSON (*.json)")
+        if path:
+            import json
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self.get_shortcuts(), f, ensure_ascii=False, indent=2)
+            QMessageBox.information(self, "成功", f"已导出到:\n{path}")
+    
+    def _import(self):
+        path, _ = QFileDialog.getOpenFileName(self, "导入快捷键配置", "", "JSON (*.json)")
+        if path:
+            import json
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    loaded = json.load(f)
+                actions = list(self._shortcuts.keys())
+                for action, key in loaded.items():
+                    if action in actions:
+                        idx = actions.index(action)
+                        self.table.item(idx, 1).setText(key)
+                QMessageBox.information(self, "成功", "快捷键配置已导入，点击确定保存")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导入失败: {e}")
+    
+    def _reset_default(self):
+        defaults = {
+            'delete': 'Delete',
+            'undo': 'Ctrl+Z',
+            'redo': 'Ctrl+Y',
+            'repeat': 'Space',
+            'relink': '',
+            'toggle_sector': '',
+            'adjust_mode': '',
+            'set_all_direction': '',
+            'align_panorama': '',
+            'rotate_left': '',
+            'rotate_right': '',
+        }
+        actions = list(self._shortcuts.keys())
+        for action, key in defaults.items():
+            if action in actions:
+                idx = actions.index(action)
+                self.table.item(idx, 1).setText(key)
+
 def main():
     import datetime
     
@@ -6519,29 +8693,14 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     
-    # 设置应用样式
-    app.setStyleSheet("""
-        QMainWindow {
-            background-color: #F5F5F7;
-        }
-        QGroupBox {
-            font-weight: bold;
-            border: 1px solid #D1D1D6;
-            border-radius: 8px;
-            margin-top: 10px;
-            padding-top: 10px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px;
-        }
-        QLabel {
-            color: #1C1C1E;
-        }
-    """)
-    
     window = PanoramaManager()
+    
+    # 设置应用样式
+    window._style_manager.app = app
+    window._style_manager.apply_to_application()
+    # 应用悬浮工具栏风格
+    window.floating_toolbar._apply_style()
+    
     window.show()
     
     sys.exit(app.exec())

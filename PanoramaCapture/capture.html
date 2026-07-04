@@ -1445,6 +1445,18 @@ function $(id){ return document.getElementById(id); }
 
 function generateId(){ return 'f' + Date.now() + '_' + Math.random().toString(36).substr(2,6); }
 
+function getLocalTimeStr(date){
+  var offset = (PROJ && PROJ.timeOffset) ? PROJ.timeOffset : 0;
+  var d = new Date(date.getTime() - offset * 1000);
+  var y = d.getFullYear();
+  var m = (d.getMonth() + 1).toString().padStart(2, '0');
+  var day = d.getDate().toString().padStart(2, '0');
+  var h = d.getHours().toString().padStart(2, '0');
+  var mi = d.getMinutes().toString().padStart(2, '0');
+  var s = d.getSeconds().toString().padStart(2, '0');
+  return y + '-' + m + '-' + day + ' ' + h + ':' + mi + ':' + s;
+}
+
 // ========== 新建项目 ==========
 function showNewProject(){
   if (PROJ) {
@@ -1533,7 +1545,7 @@ function createNewProject(){
   
   PROJ = {
     name: projName,
-    createdAt: new Date().toISOString(),
+    createdAt: getLocalTimeStr(new Date()),
     timeOffset: 0,
     calibrated: false
   };
@@ -2458,9 +2470,13 @@ function updateTimeline(markers){
     if (ACTIVE === m.id) item.className += ' active';
     var timeStr = '--:--:--';
     if(m.captureTime){
-      var d = new Date(m.captureTime);
-      var h = d.getHours(), mi = d.getMinutes(), s = d.getSeconds();
-      timeStr = (h<10?'0':'')+h+':'+(mi<10?'0':'')+mi+':'+(s<10?'0':'')+s;
+      if(m.captureTime.indexOf(' ') > 0){
+        timeStr = m.captureTime.split(' ')[1];
+      } else {
+        var d = new Date(m.captureTime);
+        var h = d.getHours(), mi = d.getMinutes(), s = d.getSeconds();
+        timeStr = (h<10?'0':'')+h+':'+(mi<10?'0':'')+mi+':'+(s<10?'0':'')+s;
+      }
     }
     var dirIcon = (m.direction !== null && m.direction !== undefined) ? ' 🧭' + Math.round(m.direction) + '°' : '';
     item.innerHTML = '<span class="tl-num">' + (i+1) + '</span>' + 
@@ -2612,8 +2628,8 @@ function autoCompletePendingCapture(){
   var m = findMarker(PENDING_MARKER_ID);
   if(m && m.status === 'pending'){
     m.status = 'captured';
-    m.startTime = CAPTURE_START_TIME ? CAPTURE_START_TIME.toISOString() : new Date().toISOString();
-    m.endTime = new Date().toISOString();
+    m.startTime = getLocalTimeStr(CAPTURE_START_TIME || new Date());
+    m.endTime = getLocalTimeStr(new Date());
     m.captureTime = m.endTime;
     showMsg('✅ 已自动完成上一个点位的拍摄记录');
     saveData();
@@ -2694,9 +2710,7 @@ var VOICE_RATE = 1.0;
 function showCapturePanel(){
   CAPTURE_START_TIME = new Date();
   PENDING_MARKER_ID = ACTIVE;
-  var now = CAPTURE_START_TIME;
-  var h = now.getHours(), mi = now.getMinutes(), s = now.getSeconds();
-  $('tTime').innerHTML = (h<10?'0':'')+h+':'+(mi<10?'0':'')+mi+':'+(s<10?'0':'')+s;
+  $('tTime').innerHTML = getLocalTimeStr(CAPTURE_START_TIME).split(' ')[1];
   $('panel').style.display = 'block';
   if (PANEL_MINIMIZED) $('panel').classList.add('minimized');
   else $('panel').classList.remove('minimized');
@@ -3044,8 +3058,8 @@ function doCapture(){
 
 function finishCapture(m){
   m.status='captured';
-  m.startTime=CAPTURE_START_TIME?CAPTURE_START_TIME.toISOString():new Date().toISOString();
-  m.endTime=new Date().toISOString();
+  m.startTime=getLocalTimeStr(CAPTURE_START_TIME || new Date());
+  m.endTime=getLocalTimeStr(new Date());
   m.captureTime=m.endTime;
   saveData(); updateDots();
   $('panel').style.display='none';
@@ -3064,13 +3078,13 @@ function startMove(){ isMovingMarker=true; $('editHint').innerHTML='拖拽点位
 function confirmMove(){ isMovingMarker=false; $('editPanel').style.display='none'; $('btnConfirmMove').style.display='none'; ACTIVE=null; saveData(); updateDots(); showMsg('位置已更新'); }
 function doDelete(){ if(!ACTIVE) return; var idx=MARKERS[CURRENT_FLOOR].findIndex(m=>m.id===ACTIVE); if(idx>=0) MARKERS[CURRENT_FLOOR].splice(idx,1); ACTIVE=null; isMovingMarker=false; $('editPanel').style.display='none'; saveData(); updateDots(); showMsg('已删除'); }
 function cancelEdit(){ isMovingMarker=false; ACTIVE=null; $('editPanel').style.display='none'; updateDots(); }
-function doCalibrate(){ if(!PROJ) return; var now=new Date(); var ct=now.toLocaleTimeString(); var input=prompt('手机时间：'+ct+'\n请输入相机时间：',ct); if(input){ var parseSec=function(s){ var p=s.split(':'); return parseInt(p[0])*3600+parseInt(p[1])*60+(parseInt(p[2])||0); }; PROJ.timeOffset=parseSec(ct)-parseSec(input); PROJ.calibrated=true; saveData(); showMsg('校准完成'); } }
+function doCalibrate(){ if(!PROJ) return; var now=new Date(); var ct=now.toLocaleTimeString(); var input=prompt('手机时间：'+ct+'\n请输入相机时间：',ct); if(input){ var parseSec=function(s){ var p=s.split(':'); return parseInt(p[0],10)*3600+parseInt(p[1],10)*60+(parseInt(p[2],10)||0); }; PROJ.timeOffset=parseSec(ct)-parseSec(input); PROJ.calibrated=true; saveData(); showMsg('校准完成'); } }
 
 // ========== 预览与导出 (完整保留) ==========
 function showPreview(){ if(!PROJ){showMsg('无数据');return} var content=$('previewContent'); content.innerHTML=''; var totalMarkers=0,totalCaptured=0,totalWithPlan=0; for(var fid in MARKERS){ var ms=MARKERS[fid]||[]; totalMarkers+=ms.length; totalCaptured+=ms.filter(m=>m.status==='captured').length; } for(var i=0;i<FLOORS.length;i++) if(FLOORPLANS[FLOORS[i].id]) totalWithPlan++; var summary=document.createElement('div'); summary.className='psummary'; summary.innerHTML='<div class="srow"><span>项目名称</span><span>'+escapeHtml(PROJ.name)+'</span></div><div class="srow"><span>楼层数量</span><span>'+FLOORS.length+'层('+totalWithPlan+'层有图)</span></div><div class="srow"><span>总点位</span><span>'+totalMarkers+'个</span></div><div class="srow"><span>已完成</span><span>'+totalCaptured+'个('+(totalMarkers>0?Math.round(totalCaptured/totalMarkers*100):0)+'%)</span></div>'; content.appendChild(summary); var sorted=FLOORS.slice().sort((a,b)=>a.order-b.order); for(var i=0;i<sorted.length;i++){ var f=sorted[i]; var fm=MARKERS[f.id]||[]; var hasPlan=!!FLOORPLANS[f.id]; var floorDiv=document.createElement('div'); floorDiv.className='pfloor'; var capturedCount=fm.filter(m=>m.status==='captured').length; floorDiv.innerHTML='<h4>'+escapeHtml(f.name)+' <span class="plan-status '+(hasPlan?'':'no-plan')+'">'+(hasPlan?'有平面图':'无平面图')+'</span> ('+capturedCount+'/'+fm.length+')</h4>'; if(fm.length===0) floorDiv.innerHTML+='<div class="pempty">暂无点位</div>'; else for(var j=0;j<fm.length;j++){ var m=fm[j]; var timeStr=m.captureTime?new Date(m.captureTime).toLocaleTimeString():'--:--:--'; var dirStr = (m.direction !== null && m.direction !== undefined) ? ' | 🧭' + Math.round(m.direction) + '°' : '';
 floorDiv.innerHTML+='<div class="pmarker"><div class="pinfo"><span class="num">'+(j+1)+'</span>'+(m.customName||'点位')+'<span class="status '+m.status+'">'+(m.status==='captured'?'已拍':'待拍')+'</span>'+dirStr+'<div class="pcoord">坐标:('+m.x.toFixed(3)+','+m.y.toFixed(3)+')</div></div><div class="ptime">'+timeStr+'</div></div>'; } content.appendChild(floorDiv); } $('previewPanel').style.display='block'; }
 function closePreview(){ $('previewPanel').style.display='none'; }
-async function doExport(){ if(!PROJ||FLOORS.length===0){showMsg('无数据');return} var floorsWithPlan=FLOORS.filter(f=>!!FLOORPLANS[f.id]); if(floorsWithPlan.length===0){showMsg('请至少为一个楼层导入平面图');return} showMsg('打包中...'); try{ var zip=new JSZip(); var floorsExport=[]; var sorted=FLOORS.slice().sort((a,b)=>a.order-b.order); for(var i=0;i<sorted.length;i++){ var f=sorted[i]; var plan=FLOORPLANS[f.id]; var fm=MARKERS[f.id]||[]; floorsExport.push({id:f.id,name:f.name,order:f.order,hasPlan:!!plan,markers:fm.map(m=>({id:m.id,status:m.status,captureTime:m.captureTime||'',startTime:m.startTime||'',endTime:m.endTime||'',customName:m.customName||'',x:m.x,y:m.y,direction:m.direction!==undefined?m.direction:null}))}); if(plan){ var imgData=plan.imgData; var base64Data=imgData.split(',')[1]; zip.file('floorplan_'+f.id+'.jpg',base64Data,{base64:true}); } } var json={schemaVersion:'4.0',projectName:PROJ.name,createdAt:PROJ.createdAt,updatedAt:new Date().toISOString(),timeOffset:PROJ.timeOffset||0,calibrated:!!PROJ.calibrated,floors:floorsExport}; zip.file('project.json',JSON.stringify(json,null,2)); var zipBlob=await zip.generateAsync({type:'blob'}); tempZipBlob=zipBlob; var zipSize=(zipBlob.size/1024/1024).toFixed(2); var zipName=PROJ.name.replace(/[^\w\u4e00-\u9fa5]/g,'_')+'_'+formatDate(new Date())+'.zip'; $('zipSize').innerHTML=zipSize; $('zipName').innerHTML=zipName; $('overlay').style.display='block'; $('sharePanel').style.display='block'; $('shareHint').style.display='none'; var canNativeShare=navigator.canShare&&navigator.canShare({files:[new File([zipBlob],zipName,{type:'application/zip'})]}); var isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream; if(canNativeShare&&isIOS){ $('nativeShareArea').style.display='block'; $('fallbackArea').style.display='none'; } else { $('nativeShareArea').style.display='none'; $('fallbackArea').style.display='block'; if(isIOS){ $('iosTip').innerHTML='如果无法自动下载，请点击「手动保存文件」按钮'; $('iosTip').style.display='block'; } } var url=URL.createObjectURL(zipBlob); var a=document.createElement('a'); a.href=url; a.download=zipName; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e){ console.error(e); showMsg('打包失败，降级JSON'); fallbackExport(); } }
+async function doExport(){ if(!PROJ||FLOORS.length===0){showMsg('无数据');return} var floorsWithPlan=FLOORS.filter(f=>!!FLOORPLANS[f.id]); if(floorsWithPlan.length===0){showMsg('请至少为一个楼层导入平面图');return} showMsg('打包中...'); try{ var zip=new JSZip(); var floorsExport=[]; var sorted=FLOORS.slice().sort((a,b)=>a.order-b.order); for(var i=0;i<sorted.length;i++){ var f=sorted[i]; var plan=FLOORPLANS[f.id]; var fm=MARKERS[f.id]||[]; floorsExport.push({id:f.id,name:f.name,order:f.order,hasPlan:!!plan,markers:fm.map(m=>({id:m.id,status:m.status,captureTime:m.captureTime||'',startTime:m.startTime||'',endTime:m.endTime||'',customName:m.customName||'',x:m.x,y:m.y,direction:m.direction!==undefined?m.direction:null}))}); if(plan){ var imgData=plan.imgData; var base64Data=imgData.split(',')[1]; zip.file('floorplan_'+f.id+'.jpg',base64Data,{base64:true}); } } var json={schemaVersion:'4.0',projectName:PROJ.name,createdAt:PROJ.createdAt,updatedAt:getLocalTimeStr(new Date()),timeOffset:PROJ.timeOffset||0,calibrated:!!PROJ.calibrated,floors:floorsExport}; zip.file('project.json',JSON.stringify(json,null,2)); var zipBlob=await zip.generateAsync({type:'blob'}); tempZipBlob=zipBlob; var zipSize=(zipBlob.size/1024/1024).toFixed(2); var zipName=PROJ.name.replace(/[^\w\u4e00-\u9fa5]/g,'_')+'_'+formatDate(new Date())+'.zip'; $('zipSize').innerHTML=zipSize; $('zipName').innerHTML=zipName; $('overlay').style.display='block'; $('sharePanel').style.display='block'; $('shareHint').style.display='none'; var canNativeShare=navigator.canShare&&navigator.canShare({files:[new File([zipBlob],zipName,{type:'application/zip'})]}); var isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream; if(canNativeShare&&isIOS){ $('nativeShareArea').style.display='block'; $('fallbackArea').style.display='none'; } else { $('nativeShareArea').style.display='none'; $('fallbackArea').style.display='block'; if(isIOS){ $('iosTip').innerHTML='如果无法自动下载，请点击「手动保存文件」按钮'; $('iosTip').style.display='block'; } } var url=URL.createObjectURL(zipBlob); var a=document.createElement('a'); a.href=url; a.download=zipName; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); } catch(e){ console.error(e); showMsg('打包失败，降级JSON'); fallbackExport(); } }
 function fallbackExport(){ var floorsExport=[]; var sorted=FLOORS.slice().sort((a,b)=>a.order-b.order); for(var i=0;i<sorted.length;i++){ var f=sorted[i]; var fm=MARKERS[f.id]||[]; floorsExport.push({id:f.id,name:f.name,order:f.order,markers:fm.map(m=>({id:m.id,status:m.status,captureTime:m.captureTime||'',startTime:m.startTime||'',endTime:m.endTime||'',customName:m.customName||'',x:m.x,y:m.y,direction:m.direction!==undefined?m.direction:null}))}); } var json={projectName:PROJ.name,floors:floorsExport}; var blob=new Blob([JSON.stringify(json,null,2)],{type:'application/json'}); var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='project.json'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); showMsg('已导出JSON'); }
 function formatDate(date){ var y=date.getFullYear(), m=(date.getMonth()+1).toString().padStart(2,'0'), d=date.getDate().toString().padStart(2,'0'); return y+m+d; }
 function hideSharePanel(){ $('overlay').style.display='none'; $('sharePanel').style.display='none'; }

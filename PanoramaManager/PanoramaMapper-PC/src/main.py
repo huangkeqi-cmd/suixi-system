@@ -205,6 +205,120 @@ class Project:
 
 
 # =============================================================================
+# 独立查看包启动器代码（导出时内嵌写入）
+# =============================================================================
+
+LAUNCHER_PY_CODE = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""随系 · 独立查看包启动器
+自动启动 HTTP 服务并打开浏览器，无需安装管理器即可查看项目。
+"""
+import os
+import sys
+import webbrowser
+import threading
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+
+
+class SilentHandler(SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # 静默日志，避免 noconsole 模式下 stderr 为 None 导致崩溃
+
+
+def main():
+    # 获取程序所在目录（兼容 PyInstaller --onefile，此时 __file__ 指向临时目录）
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 数据文件统一放在 viewer 子文件夹中
+    data_dir = os.path.join(base_dir, 'viewer')
+    os.chdir(data_dir)
+
+    # 确保 stdout/stderr 不为 None（避免 SimpleHTTPRequestHandler 在 noconsole 模式崩溃）
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+
+    # 启动服务器（自动分配端口，避免冲突）
+    server = HTTPServer(('127.0.0.1', 0), SilentHandler)
+    actual_port = server.server_address[1]
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    url = f"http://127.0.0.1:{actual_port}/index.html"
+    print("=" * 50)
+    print("  随系 · 独立查看包")
+    print("=" * 50)
+    print(f"  服务地址: {url}")
+    print("  正在自动打开浏览器...")
+    print("=" * 50)
+    webbrowser.open(url)
+
+    # 保持进程运行（兼容 --noconsole 模式）
+    try:
+        input("\n  服务运行中，关闭此窗口或按回车键停止服务...")
+    except (EOFError, RuntimeError):
+        import time
+        while True:
+            time.sleep(3600)
+    finally:
+        server.shutdown()
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+BUILD_LAUNCHER_BAT_CODE = r'''@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+
+echo ============================================================
+echo   随系 · 独立查看包 - 启动器打包脚本
+echo ============================================================
+echo.
+
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo [错误] 未找到 Python，请确认已安装并添加到 PATH。
+    pause
+    exit /b 1
+)
+
+echo [信息] 正在打包启动器，请稍候...
+
+python -m PyInstaller ^
+    --name "双击查看" ^
+    --onefile ^
+    --noconsole ^
+    --distpath "." ^
+    --workpath ".\_build" ^
+    --specpath "." ^
+    "launcher.py"
+
+if errorlevel 1 (
+    echo [错误] 打包失败，请检查上方错误信息。
+    pause
+    exit /b 1
+)
+
+rem 清理临时文件
+if exist ".\_build" rmdir /s /q ".\_build"
+if exist ".\双击查看.spec" del ".\双击查看.spec"
+if exist ".\launcher.py" del ".\launcher.py"
+
+echo.
+echo [成功] 打包完成！
+echo 输出文件：双击查看.exe
+echo 可直接双击运行，无需安装管理器。
+pause
+'''
+
+# =============================================================================
 # HTTP 服务器线程
 # =============================================================================
 
@@ -319,6 +433,109 @@ class HttpServerThread(QThread):
                         self.send_response(400)
                         self.end_headers()
                         return
+                    
+                    # ===== 新增：保存方向到 project.json（原子写入 + 自动备份）=====
+                    if self.path.startswith('/api/save_direction'):
+                        try:
+                            from urllib.parse import urlparse, parse_qs
+                            parsed = urlparse(self.path)
+                            params = parse_qs(parsed.query)
+                            marker_id = params.get('marker_id', [None])[0]
+                            direction_str = params.get('direction', [None])[0]
+                            
+                            if marker_id and direction_str is not None:
+                                direction = float(direction_str)
+                                direction = ((direction + 180) % 360) - 180
+                                
+                                parent_app = CustomHandler.external_parent_app
+                                if parent_app and parent_app.project_data and parent_app.project_dir:
+                                    # 1. 更新内存数据
+                                    updated = False
+                                    for floor_data in parent_app.project_data.floors:
+                                        for marker_data in floor_data.get('markers', []):
+                                            if marker_data['id'] == marker_id:
+                                                marker_data['direction'] = direction
+                                                updated = True
+                                                break
+                                        if updated:
+                                            break
+                                    
+                                    if not updated:
+                                        self.send_response(404)
+                                        self.send_header('Content-Type', 'application/json')
+                                        self.send_header('Access-Control-Allow-Origin', '*')
+                                        self.end_headers()
+                                        self.wfile.write(json.dumps({'status': 'error', 'message': 'marker not found'}).encode())
+                                        return
+                                    
+                                    # 2. 原子写入 project.json
+                                    parent_app.project_data.updatedAt = datetime.now().isoformat()
+                                    project_json_path = os.path.join(parent_app.project_dir, 'project.json')
+                                    
+                                    # 创建备份目录
+                                    backup_dir = os.path.join(parent_app.project_dir, '.backups')
+                                    os.makedirs(backup_dir, exist_ok=True)
+                                    
+                                    # 备份原文件（保留最近10个）
+                                    if os.path.exists(project_json_path):
+                                        import time
+                                        backup_name = f"project_{int(time.time())}.json"
+                                        shutil.copy2(project_json_path, os.path.join(backup_dir, backup_name))
+                                        # 清理旧备份
+                                        backups = sorted([f for f in os.listdir(backup_dir) if f.startswith('project_')])
+                                        for old in backups[:-10]:
+                                            try:
+                                                os.remove(os.path.join(backup_dir, old))
+                                            except:
+                                                pass
+                                    
+                                    # 原子写入：先写临时文件，再替换
+                                    temp_path = project_json_path + '.tmp'
+                                    with open(temp_path, 'w', encoding='utf-8') as f:
+                                        json.dump(parent_app.project_data.to_dict(), f, ensure_ascii=False, indent=2)
+                                    os.replace(temp_path, project_json_path)
+                                    
+                                    # 3. 同步更新 viewer 中的 project.json
+                                    viewer_dir = os.path.join(parent_app.project_dir, 'viewer')
+                                    viewer_project = os.path.join(viewer_dir, 'project.json')
+                                    if os.path.exists(viewer_dir):
+                                        with open(viewer_project, 'w', encoding='utf-8') as f:
+                                            json.dump(parent_app.project_data.to_dict(), f, ensure_ascii=False, indent=2)
+                                    
+                                    # 4. 通知管理器刷新 UI（如果正在运行）
+                                    parent_app.direction_update.emit(marker_id, direction)
+                                    
+                                    self.send_response(200)
+                                    self.send_header('Content-Type', 'application/json')
+                                    self.send_header('Access-Control-Allow-Origin', '*')
+                                    self.end_headers()
+                                    self.wfile.write(json.dumps({
+                                        'status': 'saved',
+                                        'direction': direction,
+                                        'marker_id': marker_id,
+                                        'timestamp': parent_app.project_data.updatedAt
+                                    }).encode())
+                                    print(f"[API保存] marker={marker_id}, direction={direction:.1f}° 已持久化")
+                                    return
+                                else:
+                                    self.send_response(500)
+                                    self.send_header('Content-Type', 'application/json')
+                                    self.send_header('Access-Control-Allow-Origin', '*')
+                                    self.end_headers()
+                                    self.wfile.write(json.dumps({'status': 'error', 'message': 'parent app not ready'}).encode())
+                                    return
+                        
+                        except Exception as e:
+                            print(f"[API保存] 失败: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            self.send_response(500)
+                            self.send_header('Content-Type', 'application/json')
+                            self.send_header('Access-Control-Allow-Origin', '*')
+                            self.end_headers()
+                            self.wfile.write(json.dumps({'status': 'error', 'message': str(e)}).encode())
+                            return
+                    
                     return super().do_GET()
                 
                 def end_headers(self):
@@ -834,30 +1051,46 @@ class PhotoImportThread(QThread):
     def _parse_local_photo_name(self, filename: str) -> Optional[dict]:
         """解析本机拍摄照片文件名
         
-        格式: 楼层名_点位序号_YYYYMMDD_HHMMSS.jpg
+        旧格式: 楼层名_点位序号_YYYYMMDD_HHMMSS.jpg
+        新格式: CAM_YYYYMMDD_HHMMSS_序号_D.JPG (采集端相机原始命名)
         
         Returns:
             dict: {'floor_name': str, 'marker_index': int, 'datetime': datetime}
             None: 不是本机拍摄照片格式
         """
+        # 先尝试旧格式
         match = self.LOCAL_PHOTO_RE.match(filename)
-        if not match:
-            return None
+        if match:
+            floor_name = match.group(1)
+            marker_index = int(match.group(2))
+            date_str = match.group(3)  # YYYYMMDD
+            time_str = match.group(4)  # HHMMSS
+            
+            try:
+                dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+                return {
+                    'floor_name': floor_name,
+                    'marker_index': marker_index,
+                    'datetime': dt
+                }
+            except ValueError:
+                return None
         
-        floor_name = match.group(1)
-        marker_index = int(match.group(2))
-        date_str = match.group(3)  # YYYYMMDD
-        time_str = match.group(4)  # HHMMSS
+        # 新格式：CAM_YYYYMMDD_HHMMSS_序号_D.JPG
+        match = re.search(r'^CAM[_-]?(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})[_-]?\d+[_-]?D\.', filename, re.IGNORECASE)
+        if match:
+            try:
+                year, month, day, hour, minute, second = map(int, match.groups())
+                dt = datetime(year, month, day, hour, minute, second)
+                return {
+                    'floor_name': None,
+                    'marker_index': None,
+                    'datetime': dt
+                }
+            except ValueError:
+                return None
         
-        try:
-            dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
-            return {
-                'floor_name': floor_name,
-                'marker_index': marker_index,
-                'datetime': dt
-            }
-        except ValueError:
-            return None
+        return None
     
     def _classify_photos(self, photo_files: List[str]) -> Tuple[List[dict], List[dict]]:
         """自动区分本机拍摄照片和外设拍摄照片
@@ -872,7 +1105,8 @@ class PhotoImportThread(QThread):
             filename = os.path.basename(pf)
             parsed = self._parse_local_photo_name(filename)
             
-            if parsed:
+            if parsed and parsed['floor_name'] is not None:
+                # 旧格式：有楼层名和点位序号，直接关联
                 local_photos.append({
                     'path': pf,
                     'floor_name': parsed['floor_name'],
@@ -880,6 +1114,13 @@ class PhotoImportThread(QThread):
                     'datetime': parsed['datetime']
                 })
                 print(f"[升级] 本机拍摄: {filename} (楼层:{parsed['floor_name']}, 点位:{parsed['marker_index']})")
+            elif parsed:
+                # 新格式：只有时间，没有楼层/序号信息，当作外设照片走自动偏移匹配
+                external_photos.append({
+                    'path': pf,
+                    'exif_time': parsed['datetime']
+                })
+                print(f"[升级] 新格式本机拍摄: {filename} (时间:{parsed['datetime'].strftime('%Y-%m-%d %H:%M:%S')})")
             else:
                 # 外设照片，记录EXIF时间（无EXIF时尝试文件名提取）
                 exif_time = extract_exif_datetime(pf)
@@ -921,33 +1162,39 @@ class PhotoImportThread(QThread):
                 print(f"[升级] 跳过重复: {os.path.basename(photo_path)}")
                 continue
             
-            # 查找对应的楼层
-            floor = self.floor_name_map.get(floor_name)
-            if not floor:
-                print(f"[升级] 未找到楼层: {floor_name}")
-                continue
-            
-            markers = floor.get('markers', [])
-            captured = [m for m in markers if m.get('status') == 'captured'
-                        and not (m.get('panoramaPath') or m.get('originalPhotoPath'))]
-            
-            # 阶段1: 基于时间范围匹配（核心逻辑）
-            time_matches = []
-            for m in captured:
-                marker = Marker.from_dict(m)
-                time_range = marker.get_time_range()
-                if not time_range:
+            # 确定目标楼层列表
+            if floor_name is None:
+                # 新格式：遍历所有楼层
+                target_floors = list(self.floor_name_map.values())
+            else:
+                floor = self.floor_name_map.get(floor_name)
+                if not floor:
+                    print(f"[升级] 未找到楼层: {floor_name}")
                     continue
-                start_time, end_time = time_range
-                # 去除时区以便比较
-                if start_time.tzinfo:
-                    start_time = start_time.replace(tzinfo=None)
-                if end_time.tzinfo:
-                    end_time = end_time.replace(tzinfo=None)
+                target_floors = [floor]
+            
+            # 阶段1: 基于时间范围匹配（在所有目标楼层中）
+            time_matches = []
+            for floor in target_floors:
+                markers = floor.get('markers', [])
+                captured = [m for m in markers if m.get('status') == 'captured'
+                            and not (m.get('panoramaPath') or m.get('originalPhotoPath'))]
                 
-                if start_time <= photo_time <= end_time:
-                    diff = abs((photo_time - start_time).total_seconds())
-                    time_matches.append((m.get('id', ''), diff, photo_path))
+                for m in captured:
+                    marker = Marker.from_dict(m)
+                    time_range = marker.get_time_range()
+                    if not time_range:
+                        continue
+                    start_time, end_time = time_range
+                    # 去除时区以便比较
+                    if start_time.tzinfo:
+                        start_time = start_time.replace(tzinfo=None)
+                    if end_time.tzinfo:
+                        end_time = end_time.replace(tzinfo=None)
+                    
+                    if start_time <= photo_time <= end_time:
+                        diff = abs((photo_time - start_time).total_seconds())
+                        time_matches.append((m.get('id', ''), diff, photo_path))
             
             if len(time_matches) >= 1:
                 # 选择 startTime 最接近的点位
@@ -960,7 +1207,19 @@ class PhotoImportThread(QThread):
                 print(f"[升级] 本机照片时间匹配: {os.path.basename(photo_path)} -> 标记点 {marker_id}")
                 continue
             
-            # 阶段2: 时间范围未命中，用点位序号兜底
+            # 阶段2: 时间范围未命中，用点位序号兜底（仅旧格式有有效 marker_index）
+            if marker_index is None or floor_name is None:
+                print(f"[升级] 未匹配: {os.path.basename(photo_path)}")
+                continue
+            
+            floor = self.floor_name_map.get(floor_name)
+            if not floor:
+                continue
+            
+            markers = floor.get('markers', [])
+            captured = [m for m in markers if m.get('status') == 'captured'
+                        and not (m.get('panoramaPath') or m.get('originalPhotoPath'))]
+            
             for m in captured:
                 marker_id = m.get('id', '')
                 custom_name = m.get('customName', '')
@@ -2537,12 +2796,32 @@ class PanoramaManager(QMainWindow):
         project_info_layout.addWidget(self.marker_count_label, 2, 1)
         
         project_info_layout.addWidget(QLabel("时间校准:"), 3, 0)
-        self.calibration_label = QLabel("-")
+        self.calibration_label = QLabel("未校准")
         self.calibration_label.setStyleSheet("color: #666;")
+        self.calibration_label.setToolTip("自动校准或手动输入的时间偏移值")
         project_info_layout.addWidget(self.calibration_label, 3, 1)
-        
+
+        # 手动调整校准按钮
+        self.calibration_edit_btn = QPushButton("⚙️ 手动调整")
+        self.calibration_edit_btn.setEnabled(False)
+        self.calibration_edit_btn.setStyleSheet("""
+            QPushButton {
+                padding: 2px 8px;
+                font-size: 12px;
+                background-color: #FF9500;
+                color: white;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #d67d00; }
+            QPushButton:disabled { background-color: #CCC; color: #888; }
+        """)
+        self.calibration_edit_btn.setToolTip("手动输入时间偏移值（秒），正数表示相机比手机快，负数表示相机比手机慢")
+        self.calibration_edit_btn.clicked.connect(self._manual_adjust_calibration)
+        project_info_layout.addWidget(self.calibration_edit_btn, 3, 2)
+
         right_layout.addWidget(self.project_info_group)
-        
+
         # 操作按钮
         actions_group = QGroupBox("操作")
         actions_layout = QVBoxLayout(actions_group)
@@ -2669,6 +2948,24 @@ class PanoramaManager(QMainWindow):
         self.export_project_btn.clicked.connect(self._export_for_capture)
         actions_layout.addWidget(self.export_project_btn)
 
+        # 导出独立查看包按钮
+        self.export_standalone_btn = QPushButton("📂 导出独立查看包")
+        self.export_standalone_btn.setEnabled(False)
+        self.export_standalone_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 12px;
+                font-size: 13px;
+                background-color: #FF3B30;
+                color: white;
+                border: none;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #d63025; }
+            QPushButton:disabled { background-color: #CCC; }
+        """)
+        self.export_standalone_btn.clicked.connect(self._export_standalone_viewer)
+        actions_layout.addWidget(self.export_standalone_btn)
+        
         # 服务器信息展开按钮（默认隐藏服务器信息）
         self.toggle_server_info_btn = QPushButton("📡 显示服务器信息")
         self.toggle_server_info_btn.setEnabled(False)  # 服务器启动后才可用
@@ -3544,6 +3841,11 @@ class PanoramaManager(QMainWindow):
         open_action.triggered.connect(self.open_project)
         file_menu.addAction(open_action)
         
+        # 导出独立查看包菜单
+        export_standalone_action = QAction("导出独立查看包(&V)...", self)
+        export_standalone_action.triggered.connect(self._export_standalone_viewer)
+        file_menu.addAction(export_standalone_action)
+        
         file_menu.addSeparator()
         
         exit_action = QAction("退出(&X)", self)
@@ -3672,16 +3974,24 @@ class PanoramaManager(QMainWindow):
                 if os.path.isfile(item_path) and item.lower().endswith('.zip'):
                     zip_files.append(item_path)
                 elif os.path.isdir(item_path):
-                    # 检测是否为照片文件夹（包含大量JPG）
+                    # 检测是否为照片文件夹（包含JPG即可）
                     jpg_count = 0
                     for root, dirs, files in os.walk(item_path):
                         for f in files:
                             if f.lower().endswith(('.jpg', '.jpeg')):
                                 jpg_count += 1
-                        if jpg_count > 5:
+                        if jpg_count > 0:
                             break
-                    if jpg_count > 5:
+                    if jpg_count > 0:
                         photo_dirs.append((item_path, jpg_count))
+            
+            # 也扫描根目录中的照片（照片直接放在根目录时）
+            root_jpg_count = 0
+            for f in os.listdir(dir_path):
+                if f.lower().endswith(('.jpg', '.jpeg')):
+                    root_jpg_count += 1
+            if root_jpg_count > 0 and dir_path not in [p[0] for p in photo_dirs]:
+                photo_dirs.append((dir_path, root_jpg_count))
             
             # 自动扫描常见照片目录（DCIM, Photos, Camera, 图片等）
             common_photo_dirs = ['DCIM', 'Photos', 'Camera', '图片', '照片', '相册', 'Pictures']
@@ -3893,6 +4203,8 @@ class PanoramaManager(QMainWindow):
             self.open_web_btn.setEnabled(True)
             self.save_changes_btn.setEnabled(True)
             self.export_project_btn.setEnabled(True)
+            self.export_standalone_btn.setEnabled(True)
+            self.calibration_edit_btn.setEnabled(True)
             
             QMessageBox.information(self, "成功", 
                 f"项目 '{self.project_data.projectName}' 加载成功\n"
@@ -3942,6 +4254,50 @@ class PanoramaManager(QMainWindow):
         print(f"[调试] 启动自动校准线程...")
         self._auto_calibrate_and_import(photo_files)
     
+    def _manual_adjust_calibration(self):
+        """手动调整时间校准值"""
+        if not self.project_data:
+            return
+
+        current_offset = self.project_data.timeOffset
+
+        # 弹出输入对话框，默认显示当前值
+        text, ok = QInputDialog.getText(
+            self, "手动调整时间校准",
+            f"当前偏移值: {current_offset} 秒\n"
+            f"{'(+' + str(current_offset) + '秒 相机快)' if current_offset > 0 else '(' + str(current_offset) + '秒 相机慢)' if current_offset < 0 else '(未校准)'}",
+            text=str(current_offset)
+        )
+        if not ok or not text.strip():
+            return
+
+        try:
+            new_offset = int(text.strip())
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的整数（秒数）")
+            return
+
+        # 应用新值
+        self.project_data.timeOffset = new_offset
+        self._save_project()
+
+        # 更新显示
+        if new_offset == 0:
+            calib_text = "未校准"
+        elif new_offset > 0:
+            calib_text = f"+{new_offset}秒 (相机快)"
+        else:
+            calib_text = f"{new_offset}秒 (相机慢)"
+        self.calibration_label.setText(calib_text)
+
+        # 提示
+        QMessageBox.information(
+            self, "校准已更新",
+            f"时间偏移已手动设置为: {new_offset} 秒\n"
+            f"{'(+' + str(new_offset) + '秒 相机快)' if new_offset > 0 else '(' + str(new_offset) + '秒 相机慢)' if new_offset < 0 else '(未校准)'}\n\n"
+            f"请重新执行【导入影像】以应用新的校准值。"
+        )
+
     def _auto_calibrate_and_import(self, photo_files: List[str]):
         """自动计算校准值并导入 - 全自动流程"""
         # 收集所有标记点
@@ -5089,40 +5445,103 @@ class PanoramaManager(QMainWindow):
             opacity: 0.45 !important;
         }
 
-        /* 脉冲光环动画 */
-        @keyframes hotspotPulse {
-            0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0.8; }
-            100% { transform: translate(-50%, -50%) scale(2.2); opacity: 0; }
+        /* 隐藏 Pannellum 原生指南针 */
+        .pnlm-compass {
+            display: none !important;
         }
 
-        /* 箭头弹跳动画 */
-        @keyframes arrowBounce {
-            0%, 100% { transform: translate(-50%, -50%) translateY(0); }
-            50% { transform: translate(-50%, -50%) translateY(-6px); }
+        /* 自定义可点击指北针 */
+        #custom-compass {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.92);
+            border: 2px solid rgba(0,0,0,0.15);
+            cursor: pointer;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.25);
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
         }
-
-        /* 漩涡旋转动画 */
-        @keyframes vortexSpin {
-            0% { transform: translate(-50%, -50%) rotate(0deg); }
-            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        #custom-compass:hover {
+            transform: scale(1.08);
+            background: rgba(255,255,255,1);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.35);
         }
-
-        /* 脉冲光环动画 */
-        @keyframes hotspotPulse {
-            0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0.8; }
-            100% { transform: translate(-50%, -50%) scale(2.2); opacity: 0; }
+        #custom-compass:active {
+            transform: scale(0.95);
         }
-
-        /* 箭头弹跳动画 */
-        @keyframes arrowBounce {
-            0%, 100% { transform: translate(-50%, -50%) translateY(0); }
-            50% { transform: translate(-50%, -50%) translateY(-6px); }
+        #custom-compass.aligning {
+            background: #FF9500;
+            border-color: rgba(255,255,255,0.3);
+            animation: compassPulse 1.2s ease-in-out infinite;
         }
-
-        /* 漩涡旋转动画 */
-        @keyframes vortexSpin {
-            0% { transform: translate(-50%, -50%) rotate(0deg); }
-            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        @keyframes compassPulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255,149,0,0.4); }
+            50% { box-shadow: 0 0 0 12px rgba(255,149,0,0); }
+        }
+        #custom-compass.aligning .compass-arrow {
+            border-bottom-color: white;
+        }
+        #custom-compass .compass-arrow {
+            width: 0;
+            height: 0;
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-bottom: 18px solid #1C1C1E;
+            transform-origin: center bottom;
+            transition: transform 0.1s linear;
+            margin-bottom: 2px;
+        }
+        #custom-compass .compass-label {
+            position: absolute;
+            top: -30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.85);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            white-space: nowrap;
+            opacity: 0;
+            transition: opacity 0.25s ease;
+            pointer-events: none;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        #custom-compass:hover .compass-label,
+        #custom-compass.aligning .compass-label {
+            opacity: 1;
+        }
+        /* 对齐模式提示条 */
+        .align-hint-bar {
+            position: absolute;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255,149,0,0.95);
+            color: white;
+            padding: 10px 24px;
+            border-radius: 24px;
+            font-size: 14px;
+            font-weight: 500;
+            z-index: 90;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            backdrop-filter: blur(8px);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+        }
+        .align-hint-bar.show {
+            opacity: 1;
         }
 
         /* 点位名称标签（默认隐藏，hover显示） */
@@ -5199,6 +5618,13 @@ class PanoramaManager(QMainWindow):
                 <div class="floor-name" id="current-floor">-</div>
             </div>
             <div class="roam-indicator" id="roamIndicator" style="display:none;position:absolute;top:60px;right:20px;background:rgba(52,199,89,0.9);color:white;padding:6px 14px;border-radius:16px;font-size:12px;z-index:60;">🌌 时空转换：点击黑洞环穿梭</div>
+            <!-- 自定义指北针（替换 Pannellum 原生） -->
+            <div id="custom-compass" onclick="onCompassClick()" title="点击进入对齐模式">
+                <div class="compass-arrow" id="compassArrow"></div>
+                <div class="compass-label" id="compassLabel">点击对齐方向</div>
+            </div>
+            <!-- 对齐模式提示条 -->
+            <div class="align-hint-bar" id="alignHintBar">拖动全景照片，让扇形与实际方向对齐</div>
             <div id="panorama"></div>
             <div id="photoViewer">
                 <button class="photo-nav prev" id="photoPrev" onclick="prevPhoto()" title="上一张">◀</button>
@@ -5293,7 +5719,7 @@ class PanoramaManager(QMainWindow):
                     <div class="roam-row">
                         <label>最大显示转换点数量（0=不限制）</label>
                         <input type="range" id="cfg_maxVisible" min="0" max="20" oninput="updateRoamConfig('maxVisibleHotspots', parseInt(this.value));updateDisplay('val_maxVisible',this.value==0?'不限':this.value+'个')">
-                        <span class="roam-value" id="val_maxVisible">不限</span>
+                        <span class="roam-value" id="val_maxVisible">3个</span>
                     </div>
                     <div class="roam-hint">限制显示数量可减少视觉混乱，只保留最近的转换点<br>设置为0显示所有转换点</div>
                 </div>
@@ -5328,6 +5754,16 @@ class PanoramaManager(QMainWindow):
                         <span class="roam-value" id="val_spacingDensity">0.3</span>
                     </div>
                     <div class="roam-hint">值越大，远处转换点越向灭点方向聚集<br>0=平面等距，1=最大聚集（灭点处重合）</div>
+                </div>
+
+                <div class="roam-section">
+                    <div class="roam-section-title">↔️ 横向距离（转换点间距）</div>
+                    <div class="roam-row">
+                        <label>横向展开系数</label>
+                        <input type="range" id="cfg_horizontalSpread" min="1" max="30" oninput="updateRoamConfig('horizontalSpread', parseInt(this.value)/10);updateDisplay('val_horizontalSpread',(parseInt(this.value)/10).toFixed(1))">
+                        <span class="roam-value" id="val_horizontalSpread">1.0</span>
+                    </div>
+                    <div class="roam-hint">整体调整转换点之间的水平间距<br>1=默认实际距离，大于1加宽，小于1收窄</div>
                 </div>
 
                 <!-- 透明度 -->
@@ -5503,6 +5939,169 @@ class PanoramaManager(QMainWindow):
         let viewer = null;
 
         // ========== 工具函数 ==========
+        // ========== 指北针对齐模式 ==========
+
+        function onCompassClick() {
+            const compass = document.getElementById('custom-compass');
+            const label = document.getElementById('compassLabel');
+            const hintBar = document.getElementById('alignHintBar');
+            const floor = floors[currentFloorIndex];
+            const marker = floor.markers[currentMarkerIndex];
+            
+            if (!marker || !marker.panoramaPath) {
+                showToast('❌ 当前点位无影像，无法对齐');
+                return;
+            }
+            
+            if (!compassAlignState.isAligning) {
+                // ===== 进入对齐模式 =====
+                enterAlignMode(marker, compass, label, hintBar);
+            } else {
+                // ===== 确认对齐，计算偏移并持久化 =====
+                confirmAlign(marker, compass, label, hintBar);
+            }
+        }
+
+        function enterAlignMode(marker, compass, label, hintBar) {
+            // 1. 记录当前状态
+            const currentDir = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') 
+                ? parseFloat(marker.direction) : -90;
+            const currentHeading = normalizeAngle(currentDir + 90);
+            
+            compassAlignState = {
+                isAligning: true,
+                lockedDirection: currentDir,
+                lockedHeading: currentHeading,
+                markerId: marker.id
+            };
+            
+            // 2. UI 反馈
+            compass.classList.add('aligning');
+            label.textContent = '再次点击确认对齐';
+            hintBar.classList.add('show');
+            
+            // 3. 停止实时同步（防止拖动时频繁发送更新）
+            if (window._syncInterval) {
+                clearInterval(window._syncInterval);
+                window._syncInterval = null;
+            }
+            
+            // 4. 冻结扇形渲染（使用 lockedDirection）
+            // 扇形保持静止，用户拖动全景时照片内容在变
+            
+            // 5. 更新平面图上的扇形为锁定状态
+            const wrapper = document.getElementById('floorplanWrapper');
+            if (wrapper) {
+                const overlay = document.getElementById('floorplanOverlay');
+                const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
+                const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
+                renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
+            }
+            
+            console.log('[对齐模式] 进入，锁定 direction:', currentDir, 'heading:', currentHeading);
+        }
+
+        function confirmAlign(marker, compass, label, hintBar) {
+            if (!viewer) return;
+            
+            // 1. 获取当前全景视角
+            const currentYaw = viewer.getYaw();
+            
+            // 2. 计算新方向：当前全景的 yaw 就是新的 heading
+            // 新 direction = heading - 90（因为 direction=-90 对应 heading=0/北）
+            const newHeading = currentYaw;
+            const newDirection = normalizeAngle(newHeading - 90);
+            
+            // 3. 计算变化量（用于日志）
+            const delta = normalizeAngle(newDirection - compassAlignState.lockedDirection);
+            
+            // 4. 更新本地数据
+            marker.direction = newDirection;
+            
+            // 5. 直接持久化到 project.json（原子写入 + 备份）
+            saveDirectionToFile(marker.id, newDirection)
+                .then(result => {
+                    console.log('[对齐完成] 已持久化:', result);
+                    showToast(`✅ 方向已保存: ${newDirection.toFixed(1)}°`);
+                })
+                .catch(err => {
+                    console.error('[对齐失败] 持久化失败:', err);
+                    // 降级：同步到管理器内存（下次管理器保存时写入）
+                    syncDirectionToManager(marker.id, newDirection);
+                    showToast('⚠️ 自动保存失败，已同步到管理器');
+                });
+            
+            // 6. 恢复实时同步
+            startDirectionSync(marker);
+            
+            // 7. 更新扇形渲染（使用新方向）
+            const wrapper = document.getElementById('floorplanWrapper');
+            if (wrapper) {
+                const overlay = document.getElementById('floorplanOverlay');
+                const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
+                const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
+                renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
+            }
+            
+            // 8. UI 恢复
+            compass.classList.remove('aligning');
+            label.textContent = '点击对齐方向';
+            hintBar.classList.remove('show');
+            
+            // 9. 重置状态
+            compassAlignState.isAligning = false;
+            
+            console.log('[对齐完成] 新 direction:', newDirection, '变化:', delta);
+        }
+
+        // 直接保存到文件（原子操作 + 自动备份）
+        function saveDirectionToFile(markerId, direction) {
+            return fetch(`/api/save_direction?marker_id=${encodeURIComponent(markerId)}&direction=${direction}`)
+                .then(r => {
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    return r.json();
+                });
+        }
+
+        // 降级：同步到管理器内存（不保存文件）
+        function syncDirectionToManager(markerId, direction) {
+            return fetch(`/api/set_direction?marker_id=${encodeURIComponent(markerId)}&direction=${direction}`)
+                .then(r => r.json());
+        }
+
+        // 显示临时提示
+        function showToast(message) {
+            const existing = document.querySelector('.toast-message');
+            if (existing) existing.remove();
+            
+            const toast = document.createElement('div');
+            toast.className = 'toast-message';
+            toast.style.cssText = `
+                position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+                background: rgba(52,199,89,0.95); color: white; padding: 12px 24px;
+                border-radius: 24px; font-size: 14px; font-weight: 500;
+                z-index: 1000; pointer-events: none;
+                animation: toastIn 0.3s ease, toastOut 0.3s ease 2.7s forwards;
+                backdrop-filter: blur(8px);
+                box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+            `;
+            toast.textContent = message;
+            
+            // 添加动画样式（如果不存在）
+            if (!document.getElementById('toastStyles')) {
+                const style = document.createElement('style');
+                style.id = 'toastStyles';
+                style.textContent = `
+                    @keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(-10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+                    @keyframes toastOut { from { opacity: 1; transform: translateX(-50%) translateY(0); } to { opacity: 0; transform: translateX(-50%) translateY(-10px); } }
+                `;
+                document.head.appendChild(style);
+            }
+            
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
         function normalizeAngle(angle) {
             while (angle > 180) angle -= 360;
             while (angle < -180) angle += 360;
@@ -5582,6 +6181,8 @@ class PanoramaManager(QMainWindow):
             sizeCurve: 1.2,
             // 间距密度：远处点在视觉上的压缩程度（0-1，0=无压缩，1=最大压缩）
             spacingDensity: 0.3,
+            // 横向展开系数：整体调整转换点之间的水平间距（1=默认实际距离）
+            horizontalSpread: 1.0,
             // 透明度
             opacityMin: 0.15,
             opacityMax: 1.0,
@@ -5617,8 +6218,8 @@ class PanoramaManager(QMainWindow):
             vanishingPointPitch: -15,
             // 热点样式
             hotspotStyle: 'blackhole',
-            // 最大显示热点数（0=不限）
-            maxVisibleHotspots: 0,
+            // 最大显示热点数（0=不限，默认3个）
+            maxVisibleHotspots: 3,
             // 调试
             debugLog: false
         };
@@ -5641,13 +6242,9 @@ class PanoramaManager(QMainWindow):
                         // 兼容旧配置：给新字段设置默认值
                         if (!parsed.hasOwnProperty('vanishingPointPitch')) RoamConfig.vanishingPointPitch = -15;
                         if (!parsed.hasOwnProperty('hotspotStyle')) RoamConfig.hotspotStyle = 'blackhole';
-                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 0;
+                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 3;
                         if (!parsed.hasOwnProperty('spacingDensity')) RoamConfig.spacingDensity = 0.3;
-                        // 兼容旧配置：给新字段设置默认值
-                        if (!parsed.hasOwnProperty('vanishingPointPitch')) RoamConfig.vanishingPointPitch = -15;
-                        if (!parsed.hasOwnProperty('hotspotStyle')) RoamConfig.hotspotStyle = 'blackhole';
-                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 0;
-                        if (!parsed.hasOwnProperty('spacingDensity')) RoamConfig.spacingDensity = 0.3;
+                        if (!parsed.hasOwnProperty('horizontalSpread')) RoamConfig.horizontalSpread = 1.0;
                         if (RoamConfig.debugLog) console.log('[配置] 已从 localStorage 加载保存的设置');
                     }
                 } catch(e) { console.log('[配置] 加载失败:', e); }
@@ -5699,6 +6296,9 @@ class PanoramaManager(QMainWindow):
             // 间距密度
             document.getElementById('cfg_spacingDensity').value = Math.round((RoamConfig.spacingDensity || 0.3) * 10);
             document.getElementById('val_spacingDensity').textContent = ((RoamConfig.spacingDensity || 0.3)).toFixed(1);
+            // 横向展开
+            document.getElementById('cfg_horizontalSpread').value = Math.round((RoamConfig.horizontalSpread || 1.0) * 10);
+            document.getElementById('val_horizontalSpread').textContent = ((RoamConfig.horizontalSpread || 1.0)).toFixed(1);
             
             // 透明度
             document.getElementById('cfg_opacityMax').value = Math.round(RoamConfig.opacityMax * 100);
@@ -5878,77 +6478,94 @@ class PanoramaManager(QMainWindow):
             img.id = 'floorplanImg';
             img.onload = () => {
                 wrapper.appendChild(img);
-                const imgNaturalWidth = img.naturalWidth;
-                const imgNaturalHeight = img.naturalHeight;
-                const wrapperWidth = wrapper.clientWidth;
-                const wrapperHeight = wrapper.clientHeight;
-                const baseScale = Math.min(wrapperWidth / imgNaturalWidth, wrapperHeight / imgNaturalHeight);
-                const displayedWidth = imgNaturalWidth * baseScale;
-                const displayedHeight = imgNaturalHeight * baseScale;
-                const offsetX = (wrapperWidth - displayedWidth) / 2;
-                const offsetY = (wrapperHeight - displayedHeight) / 2;
+                
+                // 使用 getBoundingClientRect 获取图片实际显示尺寸和位置（避免 CSS 计算误差）
+                const imgRect = img.getBoundingClientRect();
+                const wrapperRect = wrapper.getBoundingClientRect();
+                const displayedWidth = imgRect.width;
+                const displayedHeight = imgRect.height;
+                const offsetX = imgRect.left - wrapperRect.left;
+                const offsetY = imgRect.top - wrapperRect.top;
+                const baseScale = displayedWidth / img.naturalWidth;
+                
+                // 创建 overlay，与图片显示区域严格对齐
+                const overlay = document.createElement('div');
+                overlay.id = 'floorplanOverlay';
+                overlay.style.position = 'absolute';
+                overlay.style.left = offsetX + 'px';
+                overlay.style.top = offsetY + 'px';
+                overlay.style.width = displayedWidth + 'px';
+                overlay.style.height = displayedHeight + 'px';
+                overlay.style.pointerEvents = 'none';
+                overlay.style.transformOrigin = '0 0';
+                wrapper.appendChild(overlay);
+                
                 wrapper.dataset.baseScale = baseScale;
                 wrapper.dataset.displayedWidth = displayedWidth;
                 wrapper.dataset.displayedHeight = displayedHeight;
                 wrapper.dataset.offsetX = offsetX;
                 wrapper.dataset.offsetY = offsetY;
-                wrapper.dataset.imgNaturalWidth = imgNaturalWidth;
-                wrapper.dataset.imgNaturalHeight = imgNaturalHeight;
-                renderMarkers(wrapper, floor.markers, offsetX, offsetY, displayedWidth, displayedHeight);
+                wrapper.dataset.imgNaturalWidth = img.naturalWidth;
+                wrapper.dataset.imgNaturalHeight = img.naturalHeight;
+                
+                renderMarkers(overlay, floor.markers);
                 addZoomControls(container);
                 addZoomEvents(wrapper, img, floor.markers);
-                renderSectors(wrapper, floor.markers, offsetX, offsetY, displayedWidth, displayedHeight, 1);
+                renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
                 loadPanorama(0);
             };
             img.onerror = () => { container.innerHTML = '<p style="color: #666;">平面图加载失败</p>'; };
         }
 
-        function renderMarkers(wrapper, markers, offsetX, offsetY, displayedWidth, displayedHeight) {
-            wrapper.querySelectorAll('.marker-dot').forEach(dot => dot.remove());
+        function renderMarkers(overlay, markers) {
+            overlay.querySelectorAll('.marker-dot').forEach(dot => dot.remove());
             markers.forEach((marker, idx) => {
                 const dot = document.createElement('div');
                 const statusClass = marker.status || 'pending';
                 dot.className = 'marker-dot ' + statusClass + (idx === 0 ? ' active' : '');
-                dot.dataset.markerX = marker.x;
-                dot.dataset.markerY = marker.y;
+                dot.style.position = 'absolute';
+                dot.style.left = (marker.x * 100) + '%';
+                dot.style.top = (marker.y * 100) + '%';
+                dot.style.pointerEvents = 'auto';
                 dot.dataset.markerIndex = idx;
-                updateMarkerPosition(dot, offsetX, offsetY, displayedWidth, displayedHeight);
                 dot.onclick = function(e) {
                     e.stopPropagation();
                     loadPanorama(idx);
                 };
-                wrapper.appendChild(dot);
+                overlay.appendChild(dot);
             });
         }
 
-        function updateMarkerPosition(dot, offsetX, offsetY, displayedWidth, displayedHeight) {
-            const markerX = parseFloat(dot.dataset.markerX);
-            const markerY = parseFloat(dot.dataset.markerY);
-            const leftPos = offsetX + (markerX * displayedWidth);
-            const topPos = offsetY + (markerY * displayedHeight);
-            dot.style.left = leftPos + 'px';
-            dot.style.top = topPos + 'px';
-        }
-
-        function renderSectors(wrapper, markers, offsetX, offsetY, displayedWidth, displayedHeight, scale) {
-            wrapper.querySelectorAll('.sector-svg').forEach(s => s.remove());
+        function renderSectors(overlay, markers, displayedWidth, displayedHeight) {
+            overlay.querySelectorAll('.sector-svg').forEach(s => s.remove());
             const sectorAngle = 90;
             const radius = 30;
+            
             markers.forEach((marker, idx) => {
                 if (idx !== currentMarkerIndex) return;
+                
                 let direction;
-                if (currentSectorDirection !== null) {
-                    direction = currentSectorDirection;
-                } else if (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') {
-                    direction = parseFloat(marker.direction);
-                } else { return; }
-                const cx = offsetX + (marker.x * displayedWidth);
-                const cy = offsetY + (marker.y * displayedHeight);
+                
+                // 对齐模式：使用锁定的方向，不随全景转动
+                if (compassAlignState.isAligning && compassAlignState.markerId === marker.id) {
+                    direction = compassAlignState.lockedDirection;
+                } else {
+                    // 正常模式：使用 marker 数据
+                    if (currentSectorDirection !== null) {
+                        direction = currentSectorDirection;
+                    } else if (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') {
+                        direction = parseFloat(marker.direction);
+                    } else { return; }
+                }
+                
+                const cx = marker.x * displayedWidth;
+                const cy = marker.y * displayedHeight;
                 const ang = direction;
                 const half = sectorAngle / 2;
                 const startAngDeg = -(ang + half);
                 const startAng = startAngDeg * Math.PI / 180;
                 const endAng = (startAngDeg + sectorAngle) * Math.PI / 180;
+                
                 const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
                 svg.classList.add('sector-svg');
                 svg.style.position = 'absolute';
@@ -5958,22 +6575,22 @@ class PanoramaManager(QMainWindow):
                 svg.style.height = '100%';
                 svg.style.pointerEvents = 'none';
                 svg.style.zIndex = '5';
-                svg.setAttribute('viewBox', '0 0 ' + wrapper.clientWidth + ' ' + wrapper.clientHeight);
+                svg.setAttribute('viewBox', '0 0 ' + displayedWidth + ' ' + displayedHeight);
+                
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const r = radius;
-                const leftRad = startAng;
-                const lx = cx + r * Math.cos(leftRad);
-                const ly = cy - r * Math.sin(leftRad);
-                const rightRad = endAng;
-                const rx = cx + r * Math.cos(rightRad);
-                const ry = cy - r * Math.sin(rightRad);
+                const lx = cx + r * Math.cos(startAng);
+                const ly = cy - r * Math.sin(startAng);
+                const rx = cx + r * Math.cos(endAng);
+                const ry = cy - r * Math.sin(endAng);
                 const d = 'M ' + cx + ' ' + cy + ' L ' + lx + ' ' + ly + ' A ' + r + ' ' + r + ' 0 0 0 ' + rx + ' ' + ry + ' Z';
+                
                 path.setAttribute('d', d);
                 path.setAttribute('fill', 'rgba(0, 122, 255, 0.25)');
                 path.setAttribute('stroke', 'rgba(255, 255, 255, 0.7)');
                 path.setAttribute('stroke-width', '1');
                 svg.appendChild(path);
-                wrapper.appendChild(svg);
+                overlay.appendChild(svg);
             });
         }
 
@@ -6079,20 +6696,13 @@ class PanoramaManager(QMainWindow):
 
         function applyTransform(wrapper, img, markers) {
             img.style.transform = 'translate(' + currentOffsetX + 'px, ' + currentOffsetY + 'px) scale(' + currentScale + ')';
-            const baseOffsetX = parseFloat(wrapper.dataset.offsetX);
-            const baseOffsetY = parseFloat(wrapper.dataset.offsetY);
+            const overlay = document.getElementById('floorplanOverlay');
+            if (overlay) {
+                overlay.style.transform = 'translate(' + currentOffsetX + 'px, ' + currentOffsetY + 'px) scale(' + currentScale + ')';
+            }
             const displayedWidth = parseFloat(wrapper.dataset.displayedWidth);
             const displayedHeight = parseFloat(wrapper.dataset.displayedHeight);
-            wrapper.querySelectorAll('.marker-dot').forEach(dot => {
-                const markerX = parseFloat(dot.dataset.markerX);
-                const markerY = parseFloat(dot.dataset.markerY);
-                const leftPos = baseOffsetX + currentOffsetX + (markerX * displayedWidth * currentScale);
-                const topPos = baseOffsetY + currentOffsetY + (markerY * displayedHeight * currentScale);
-                dot.style.left = leftPos + 'px';
-                dot.style.top = topPos + 'px';
-                dot.style.transform = 'translate(-50%, -50%)';
-            });
-            renderSectors(wrapper, markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+            renderSectors(overlay, markers, displayedWidth, displayedHeight);
         }
 
         function zoomIn() {
@@ -6144,9 +6754,30 @@ class PanoramaManager(QMainWindow):
         let photoDragStartY = 0;
         let currentSectorDirection = null;
 
+        // ========== 指北针对齐模式状态 ==========
+        let compassAlignState = {
+            isAligning: false,        // 是否处于对齐模式
+            lockedDirection: null,    // 锁定的扇形方向
+            lockedHeading: null,      // 锁定的照片基准 heading
+            markerId: null            // 当前对齐的点位ID
+        };
+
         function loadPanorama(index) {
             const floor = floors[currentFloorIndex];
             if (floor.markers.length === 0) return;
+            
+            // 切换点位时，如果对齐模式未确认，自动取消
+            if (compassAlignState.isAligning && compassAlignState.markerId !== floor.markers[index]?.id) {
+                const compass = document.getElementById('custom-compass');
+                const label = document.getElementById('compassLabel');
+                const hintBar = document.getElementById('alignHintBar');
+                compass.classList.remove('aligning');
+                label.textContent = '点击对齐方向';
+                hintBar.classList.remove('show');
+                compassAlignState.isAligning = false;
+                startDirectionSync(floor.markers[currentMarkerIndex]);
+            }
+            
             currentMarkerIndex = index;
             const marker = floor.markers[index];
             document.getElementById('current-title').textContent = marker.customName || marker.cameraFileName || '点位' + (index + 1);
@@ -6159,11 +6790,10 @@ class PanoramaManager(QMainWindow):
             currentSectorDirection = null;
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
-                const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
-                const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
+                const overlay = document.getElementById('floorplanOverlay');
                 const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
                 const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
-                renderSectors(wrapper, floor.markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
             }
             if (!marker.panoramaPath) {
                 if (viewer) viewer.destroy();
@@ -6229,7 +6859,7 @@ class PanoramaManager(QMainWindow):
             
             const config = {
                 autoLoad: true,
-                compass: true,
+                compass: false,  // 禁用原生指南针，使用自定义
                 showFullscreenCtrl: true,
                 showZoomCtrl: true,
                 title: marker.customName || '',
@@ -6280,14 +6910,18 @@ class PanoramaManager(QMainWindow):
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
                 const floor = floors[currentFloorIndex];
-                const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
-                const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
+                const overlay = document.getElementById('floorplanOverlay');
                 const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
                 const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
-                renderSectors(wrapper, floor.markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
             }
             
             const sendDirectionUpdate = (yaw) => {
+                // 对齐模式下不发送实时更新
+                if (compassAlignState.isAligning) {
+                    return;
+                }
+                
                 if (initialYaw === null) {
                     initialYaw = yaw;
                     console.log('[全景] 初始视角 yaw:', yaw, '基准方向:', baseDirection);
@@ -6302,11 +6936,10 @@ class PanoramaManager(QMainWindow):
                 const wrapper = document.getElementById('floorplanWrapper');
                 if (wrapper) {
                     const floor = floors[currentFloorIndex];
-                    const baseOffsetX = parseFloat(wrapper.dataset.offsetX) || 0;
-                    const baseOffsetY = parseFloat(wrapper.dataset.offsetY) || 0;
+                    const overlay = document.getElementById('floorplanOverlay');
                     const displayedWidth = parseFloat(wrapper.dataset.displayedWidth) || 0;
                     const displayedHeight = parseFloat(wrapper.dataset.displayedHeight) || 0;
-                    renderSectors(wrapper, floor.markers, baseOffsetX + currentOffsetX, baseOffsetY + currentOffsetY, displayedWidth * currentScale, displayedHeight * currentScale, currentScale);
+                    renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
                 }
                 
                 const currentMarker = floors[currentFloorIndex].markers[currentMarkerIndex];
@@ -6834,7 +7467,8 @@ class PanoramaManager(QMainWindow):
 
                     // 间距密度压缩：远处点视觉间距更小（向灭点方向聚集）
                     var spacingDensity = (C.spacingDensity !== undefined) ? C.spacingDensity : 0.3;
-                    var visualYaw = hs.yaw * (1 - spacingDensity * (hs.perspectiveRatio || 0));
+                    var horizontalSpread = (C.horizontalSpread !== undefined) ? C.horizontalSpread : 1.0;
+                    var visualYaw = hs.yaw * horizontalSpread * (1 - spacingDensity * (hs.perspectiveRatio || 0));
 
                     return {
                     pitch: computedPitch,
@@ -8058,20 +8692,30 @@ function jumpToMarker(targetId) {
                     return
 
     def _on_direction_update_from_web(self, marker_id: str, direction: float):
-        """从 Web Viewer 接收到的方向更新（实时同步显示，不保存到文件）"""
-        # 如果在调整模式，忽略实时同步
+        """从 Web Viewer 接收到的方向更新（文件已由服务端自动保存，此处仅更新 UI 显示）"""
+        # 如果在调整模式，仍然接受对齐模式的保存结果（区分来源：对齐模式会发送保存请求）
+        # 调整模式下的实时同步仍然忽略，但保存接口的回调会触发此处
         if getattr(self, '_adjust_mode', False):
-            return
+            # 检查是否来自对齐确认：如果 direction 与当前不同，说明是保存结果
+            current_item = self.canvas.marker_items.get(marker_id)
+            if current_item and current_item.data(2) is not None:
+                current_dir = float(current_item.data(2))
+                if abs(direction - current_dir) > 1:  # 显著变化，视为对齐确认
+                    pass  # 继续处理，不忽略
+                else:
+                    return  # 实时同步，忽略
+            else:
+                return
         
         print(f"[联动] 收到方向更新: marker={marker_id}, direction={direction:.1f}°")
         
-        # 更新画布上的扇形（仅实时显示）
+        # 更新画布
         item = self.canvas.marker_items.get(marker_id)
         if item:
             item.setData(2, direction)
             self.canvas.render_direction_sectors()
         
-        # 更新内存中的数据模型（不保存文件）
+        # 更新内存数据模型（确保一致性）
         for floor_data in self.project_data.floors:
             for marker_data in floor_data.get('markers', []):
                 if marker_data['id'] == marker_id:
@@ -8082,6 +8726,21 @@ function jumpToMarker(targetId) {
         if hasattr(self, 'current_marker') and self.current_marker and self.current_marker.id == marker_id:
             self.current_marker.direction = direction
             self.direction_label.setText(f"{direction:.0f}°")
+            # 不再标记"已变更"状态，因为文件已自动保存
+            # 恢复保存按钮为普通状态
+            self.save_changes_btn.setStyleSheet("""
+                QPushButton {
+                    padding: 6px 12px;
+                    font-size: 13px;
+                    background-color: #5856D6;
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                }
+                QPushButton:hover { background-color: #3f3ea8; }
+                QPushButton:disabled { background-color: #CCC; }
+            """)
+            self.save_changes_btn.setText("💾 保存修改到项目")
 
     def _delete_current_marker(self):
         """从右侧删除当前选中的点位"""
@@ -8308,10 +8967,182 @@ function jumpToMarker(targetId) {
             import traceback
             traceback.print_exc()
 
+    def _export_standalone_viewer(self):
+        """导出独立查看包（双击即可查看，无需安装管理器）"""
+        if not self.project_dir or not self.project_data:
+            QMessageBox.warning(self, "提示", "请先加载项目")
+            return
+        
+        try:
+            # 选择输出目录
+            export_dir = QFileDialog.getExistingDirectory(
+                self, "选择独立查看包输出目录", os.path.dirname(self.project_dir)
+            )
+            if not export_dir:
+                return
+            
+            # 使用项目名作为子目录
+            project_name = self.project_data.projectName or "未命名项目"
+            safe_name = "".join(c for c in project_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            if not safe_name:
+                safe_name = "project"
+            package_dir = os.path.join(export_dir, f"{safe_name}_查看包")
+            
+            # 如果目录已存在，添加数字后缀
+            counter = 1
+            original_dir = package_dir
+            while os.path.exists(package_dir):
+                package_dir = f"{original_dir}_{counter}"
+                counter += 1
+            
+            os.makedirs(package_dir, exist_ok=True)
+            
+            # 创建 viewer 子文件夹，存放所有数据文件
+            viewer_dir = os.path.join(package_dir, 'viewer')
+            os.makedirs(viewer_dir, exist_ok=True)
+            
+            # 显示进度对话框
+            progress = QProgressDialog("正在导出独立查看包...", "取消", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress.setWindowTitle("导出中")
+            progress.setValue(0)
+            progress.show()
+            
+            # 1. 复制外部照片到 viewer/external_photos/
+            photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+            external_photos_dir = os.path.join(viewer_dir, 'external_photos')
+            if photo_base_dir and os.path.exists(photo_base_dir):
+                progress.setLabelText("正在复制照片...")
+                progress.setValue(10)
+                QApplication.processEvents()
+                
+                for root, dirs, files in os.walk(photo_base_dir):
+                    rel_root = os.path.relpath(root, photo_base_dir)
+                    dst_root = os.path.join(external_photos_dir, rel_root) if rel_root != '.' else external_photos_dir
+                    os.makedirs(dst_root, exist_ok=True)
+                    for f in files:
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                            shutil.copy2(os.path.join(root, f), os.path.join(dst_root, f))
+            
+            progress.setValue(40)
+            QApplication.processEvents()
+            
+            # 2. 复制各楼层平面图到 viewer/
+            progress.setLabelText("正在复制平面图...")
+            for floor_data in self.project_data.floors:
+                floor_id = floor_data['id']
+                for ext in ['.jpg', '.png']:
+                    src = os.path.join(self.project_dir, f"floorplan_{floor_id}{ext}")
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(viewer_dir, f"floorplan_{floor_id}{ext}"))
+                        break
+            
+            progress.setValue(50)
+            QApplication.processEvents()
+            
+            # 3. 下载 Pannellum 离线资源并替换 CDN 引用
+            progress.setLabelText("正在下载离线资源...")
+            pannellum_files = {
+                'pannellum.css': 'https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css',
+                'pannellum.js': 'https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js',
+                'spritesheet.png': 'https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/spritesheet.png',
+            }
+            offline_ok = True
+            for fname, url in pannellum_files.items():
+                dst = os.path.join(viewer_dir, fname)
+                try:
+                    import urllib.request
+                    urllib.request.urlretrieve(url, dst)
+                except Exception as e:
+                    print(f"[警告] 下载 {fname} 失败: {e}")
+                    offline_ok = False
+            
+            # 生成查看器 HTML
+            self._generate_viewer_html(viewer_dir)
+            
+            # 替换 HTML 中的 CDN 引用为本地路径
+            index_html = os.path.join(viewer_dir, 'index.html')
+            if os.path.exists(index_html):
+                with open(index_html, 'r', encoding='utf-8') as f:
+                    html_content = f.read()
+                html_content = html_content.replace(
+                    'href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css"',
+                    'href="./pannellum.css"'
+                )
+                html_content = html_content.replace(
+                    'src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"',
+                    'src="./pannellum.js"'
+                )
+                with open(index_html, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+            
+            progress.setValue(70)
+            QApplication.processEvents()
+            
+            # 4. 写入 launcher.py（放在根目录）
+            launcher_py = os.path.join(package_dir, 'launcher.py')
+            with open(launcher_py, 'w', encoding='utf-8') as f:
+                f.write(LAUNCHER_PY_CODE)
+            
+            # 5. 写入 build_launcher.bat（放在根目录）
+            build_bat = os.path.join(package_dir, 'build_launcher.bat')
+            with open(build_bat, 'w', encoding='utf-8') as f:
+                f.write(BUILD_LAUNCHER_BAT_CODE)
+            
+            progress.setValue(80)
+            QApplication.processEvents()
+            
+            # 6. 尝试自动打包 launcher.py
+            launcher_exe = os.path.join(package_dir, "双击查看.exe")
+            auto_built = False
+            try:
+                import subprocess
+                work_dir = os.path.join(package_dir, '_build')
+                os.makedirs(work_dir, exist_ok=True)
+                result = subprocess.run(
+                    ['python', '-m', 'PyInstaller', '--name', '双击查看', '--onefile', '--noconsole',
+                     '--distpath', package_dir, '--workpath', work_dir, '--specpath', package_dir,
+                     launcher_py],
+                    capture_output=True, text=True, timeout=180
+                )
+                if result.returncode == 0 and os.path.exists(launcher_exe):
+                    # 清理临时文件
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    if os.path.exists(launcher_py):
+                        os.remove(launcher_py)
+                    spec_file = os.path.join(package_dir, '双击查看.spec')
+                    if os.path.exists(spec_file):
+                        os.remove(spec_file)
+                    auto_built = True
+                else:
+                    print(f"[调试] PyInstaller 输出: {result.stderr}")
+                    shutil.rmtree(work_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"[调试] 自动打包失败: {e}")
+            
+            progress.setValue(100)
+            QApplication.processEvents()
+            
+            # 完成提示
+            msg = f"独立查看包已导出到:\n{package_dir}\n\n"
+            if auto_built:
+                msg += "已自动生成 双击查看.exe，可直接双击运行。"
+            else:
+                msg += "未自动打包成 exe，请手动运行 build_launcher.bat 生成 双击查看.exe。"
+            if not offline_ok:
+                msg += "\n\n⚠️ Pannellum 离线资源下载失败，查看包可能仍需要网络连接。"
+            
+            QMessageBox.information(self, "导出成功", msg)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", f"错误: {e}")
+            import traceback
+            traceback.print_exc()
+
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.5</h2>
+            """<h2>随系 · 影像管理器 V1.7</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>""")

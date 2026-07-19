@@ -504,8 +504,7 @@ function doClearStorage(){
   }
   
   try {
-    StorageManager.clearAllChunks();
-    localStorage.removeItem('pm_multi_floor');
+    StorageManager.clear();
     localStorage.removeItem('panorama_capture_version');
     localStorage.removeItem('panorama_voice_text');
     localStorage.removeItem('panorama_voice_rate');
@@ -564,13 +563,14 @@ function showFloorPlanPrompt(){
     $('theImg').style.display = 'none';
     $('noPlanMsg').style.display = 'block';
     $('compassBtn').style.display = 'none';
+    clearDots();
+    updateFloorInfo();
   } else {
     $('noPlanMsg').style.display = 'none';
     loadFloorPlan(currentPlan);
     $('compassBtn').style.display = 'block';
     checkAlignmentPrompt();
   }
-  updateFloorInfo();
 }
 
 function importFloorPlan(){
@@ -1268,7 +1268,11 @@ function switchFloor(fid){
   if(fid === CURRENT_FLOOR) return;
   CURRENT_FLOOR = fid;
   ACTIVE = null;
+  PENDING_MARKER_ID = null;
+  CAPTURE_START_TIME = null;
   saveData();
+  clearDots();
+  updateDots();
   renderFloorBar();
   showFloorPlanPrompt();
   showMsg('切换到 ' + getCurrentFloor().name);
@@ -2102,10 +2106,10 @@ function shareByEmail(){ showMsg('请手动发送文件'); }
 function shareToWeChat(){ showMsg('请手动发送文件'); }
 function manualSaveFile(){ if(tempZipBlob){ var zipName=PROJ.name.replace(/[^\w\u4e00-\u9fa5]/g,'_')+'_'+formatDate(new Date())+'.zip'; var url=URL.createObjectURL(tempZipBlob); var a=document.createElement('a'); a.href=url; a.download=zipName; document.body.appendChild(a); a.click(); setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },1000); showMsg('已尝试保存文件'); } }
 
-// ========== 存储管理器（原样） ==========
-var StorageManager={ CHUNK_SIZE:1000, KEY_PREFIX:'pm_chunk_', META_KEY:'pm_meta', splitIntoChunks:function(markers){ var chunks=[]; return chunks; }, save:function(data){ try{ this.clearAllChunks(); localStorage.setItem(this.META_KEY,JSON.stringify({})); return {success:true}; }catch(e){return {success:false};} }, load:function(){ return null; }, clearAllChunks:function(){ var keys=[]; for(var i=0;i<localStorage.length;i++){ var key=localStorage.key(i); if(key&&key.indexOf(this.KEY_PREFIX)===0) keys.push(key); } keys.forEach(k=>localStorage.removeItem(k)); localStorage.removeItem(this.META_KEY); }, getStats:function(){ return {totalSizeMB:'0.00',markerKeys:0,markerSizeMB:'0.00',percent:0}; } };
+// ========== 存储管理器 ==========
+var StorageManager={ STORAGE_KEY:'pm_multi_floor', save:function(data){ try{ localStorage.setItem(this.STORAGE_KEY, JSON.stringify(data)); return {success:true}; }catch(e){return {success:false};} }, load:function(){ try{ var s=localStorage.getItem(this.STORAGE_KEY); if(s) return JSON.parse(s); return null; }catch(e){return null;} }, clear:function(){ localStorage.removeItem(this.STORAGE_KEY); }, getStats:function(){ try{ var s=localStorage.getItem(this.STORAGE_KEY); if(!s) return {totalSizeMB:'0.00',percent:0}; var sizeMB=(new Blob([s]).size/1024/1024).toFixed(2); return {totalSizeMB:sizeMB,percent:0}; }catch(e){ return {totalSizeMB:'0.00',percent:0}; } } };
 function saveData(){ try{ if(!FLOORS) FLOORS=[]; if(!MARKERS) MARKERS={}; if(!FLOORPLANS) FLOORPLANS={}; for(var i=0;i<FLOORS.length;i++) if(!MARKERS[FLOORS[i].id]) MARKERS[FLOORS[i].id]=[]; var data={proj:PROJ, floors:FLOORS, currentFloor:CURRENT_FLOOR, markers:MARKERS, floorplans:FLOORPLANS}; StorageManager.save(data); } catch(e){ showMsg('保存失败'); } }
-function loadData(){ try{ var chunkData=StorageManager.load(); if(chunkData){ PROJ=chunkData.proj; FLOORS=chunkData.floors||[]; CURRENT_FLOOR=chunkData.currentFloor; MARKERS=chunkData.markers||{}; FLOORPLANS=chunkData.floorplans||{}; } else{ var s=localStorage.getItem('pm_multi_floor'); if(s){ var data=JSON.parse(s); PROJ=data.proj; FLOORS=data.floors||[]; CURRENT_FLOOR=data.currentFloor; MARKERS=data.markers||{}; FLOORPLANS=data.floorplans||{}; if(PROJ){ saveData(); localStorage.removeItem('pm_multi_floor'); } } } if(PROJ){ $('title').innerHTML=PROJ.name; renderFloorBar(); if(CURRENT_FLOOR&&FLOORPLANS[CURRENT_FLOOR]) loadFloorPlan(FLOORPLANS[CURRENT_FLOOR]); else showFloorPlanPrompt(); } } catch(e){ console.error(e); } }
+function loadData(){ try{ var chunkData=StorageManager.load(); if(chunkData){ PROJ=chunkData.proj; FLOORS=chunkData.floors||[]; CURRENT_FLOOR=chunkData.currentFloor; MARKERS=chunkData.markers||{}; FLOORPLANS=chunkData.floorplans||{}; } if(PROJ){ $('title').innerHTML=PROJ.name; renderFloorBar(); if(CURRENT_FLOOR&&FLOORPLANS[CURRENT_FLOOR]) loadFloorPlan(FLOORPLANS[CURRENT_FLOOR]); else showFloorPlanPrompt(); } } catch(e){ console.error(e); } }
 
 window.onload=function(){ loadVoiceSettings(); loadFloorBarSettings(); loadCaptureSettings(); loadDirectionSettings(); loadPlanAlignmentSettings(); setTimeout(function(){ loadData(); setDirMode(DIRECTION_MODE); startGlobalGyro(); },100); };
 $('floorPlanInput').addEventListener('change',function(e){ var targetFloor=this.getAttribute('data-target-floor'); if(targetFloor&&targetFloor!==CURRENT_FLOOR){ var file=e.target.files[0]; if(file){ var reader=new FileReader(); reader.onload=function(evt){ var img=new Image(); img.onload=function(){ var w=img.naturalWidth,h=img.naturalHeight,MAX=2500,finalData; if(w>MAX||h>MAX){ var r=Math.min(MAX/w,MAX/h); w=Math.round(w*r);h=Math.round(h*r); var c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h); finalData=c.toDataURL('image/jpeg',0.85); } else finalData=evt.target.result; FLOORPLANS[targetFloor]={imgData:finalData,imgW:w,imgH:h,originalName:file.name}; saveData(); renderFloorList(); renderFloorBar(); showMsg('平面图导入成功'); }; img.src=evt.target.result; }; reader.readAsDataURL(file); } this.removeAttribute('data-target-floor'); this.value=''; } });

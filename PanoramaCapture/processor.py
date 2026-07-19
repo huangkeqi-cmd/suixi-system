@@ -458,6 +458,10 @@ class PanoramaProcessor:
                         "status": marker.get("status", "pending")
                     }
                     
+                    # 导出方向（direction=0 表示正北）
+                    if marker.get("direction") is not None and marker["direction"] != "":
+                        marker_data["direction"] = marker["direction"]
+                    
                     # 复制照片
                     if "photo_path" in marker:
                         src = marker["photo_path"]
@@ -624,12 +628,17 @@ function selectMarker(idx) {
     
     // 加载影像
     if (viewer) viewer.destroy();
+    const direction = (m.direction !== null && m.direction !== undefined && m.direction !== '') ? parseFloat(m.direction) : 0;
+    const yaw = direction;
+    const northOffset = 0; // direction=0 表示正北，即全景中心经线为北
     viewer = pannellum.viewer('pano', {
         type: 'equirectangular',
         panorama: m.photo,
         autoLoad: true,
         compass: true,
-        showFullscreenCtrl: true
+        showFullscreenCtrl: true,
+        northOffset: northOffset,
+        yaw: yaw
     });
 }
 

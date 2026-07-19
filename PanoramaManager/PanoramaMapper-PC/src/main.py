@@ -78,7 +78,7 @@ class Marker:
     panoramaPath: str = ""
     originalPhotoPath: str = ""  # 原始照片绝对路径（不复制照片时使用）
     photos: List[str] = field(default_factory=list)  # 关联的多张照片路径列表
-    direction: float = -90.0  # 扇形视线方向，-90度为上（12点钟方向）
+    direction: float = 0.0  # 扇形视线方向，0度为上/正北（12点钟方向）
     
     def to_dict(self) -> dict:
         return asdict(self)
@@ -169,6 +169,10 @@ class Project:
     def __post_init__(self):
         if self.markers is None:
             self.markers = []
+        for fld in ['photoBaseDir', 'projectName', 'floorplan', 'floorplanOriginalName']:
+            val = getattr(self, fld, None)
+            if not isinstance(val, str):
+                setattr(self, fld, str(val) if val else '')
     
     @classmethod
     def from_dict(cls, data: dict) -> 'Project':
@@ -1551,6 +1555,9 @@ class FloorplanCanvas(QGraphicsView):
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
 
+        # 标记点固定像素半径（缩放时保持屏幕尺寸不变）
+        self._marker_pixel_radius = 12  # 默认 24px 直径
+
         self.pixmap_item = None
         self.marker_items = {}
         self.text_items = []  # 跟踪文本标签
@@ -1611,7 +1618,7 @@ class FloorplanCanvas(QGraphicsView):
         color = colors.get(status, QColor(128, 128, 128))
 
         # 绘制圆形标记
-        radius = 8
+        radius = self._marker_pixel_radius
         ellipse = QGraphicsEllipseItem(
             pixel_x - radius, pixel_y - radius,
             radius * 2, radius * 2
@@ -1645,7 +1652,7 @@ class FloorplanCanvas(QGraphicsView):
         rect = self.pixmap_item.boundingRect()
         pixel_x = x * rect.width()
         pixel_y = y * rect.height()
-        radius = 8
+        radius = self._marker_pixel_radius
         item.setRect(pixel_x - radius, pixel_y - radius, radius * 2, radius * 2)
 
     def clear_markers(self):
@@ -1689,7 +1696,7 @@ class FloorplanCanvas(QGraphicsView):
             
             ang = direction
             half = sector_angle / 2
-            start_ang = -(ang + half)
+            start_ang = -(ang + half) + 90
             
             path = QPainterPath()
             path.moveTo(cx, cy)
@@ -1724,7 +1731,7 @@ class FloorplanCanvas(QGraphicsView):
         
         current_direction = item.data(2)
         if current_direction is None:
-            current_direction = -90.0
+            current_direction = 0.0
         
         new_direction = (current_direction + angle_delta) % 360
         if new_direction > 180:
@@ -1804,14 +1811,16 @@ class FloorplanCanvas(QGraphicsView):
                     angle_deg = math.degrees(angle_rad)
                     
                     # 转换为扇形方向角度
-                    # direction: -90°=上(12点), 0°=右, 90°=下, ±180°=左
+                    # direction: 0°=上(12点/北), 90°=右(东), 180°=下(南), -90°=左(西)
                     # math.atan2: 0°=右, 90°=下, -90°=上, ±180°=左
-                    # 所以 direction = angle_deg（方向一致）
-                    new_dir = angle_deg
+                    # 所以 direction = angle_deg + 90（统一方向：0=北）
+                    new_dir = angle_deg + 90
                     
                     # 标准化到 [-180, 180]
-                    if new_dir > 180:
+                    while new_dir > 180:
                         new_dir -= 360
+                    while new_dir < -180:
+                        new_dir += 360
                     
                     item.setData(2, new_dir)
                     self.render_direction_sectors()
@@ -1945,7 +1954,7 @@ class FloorplanCanvas(QGraphicsView):
 
 
     def wheelEvent(self, event):
-        """鼠标滚轮缩放——以鼠标位置为基准点"""
+        """鼠标滚轮缩放——以鼠标位置为基准点，标记点保持屏幕固定尺寸"""
         factor = 1.15
         if event.angleDelta().y() < 0:
             factor = 1.0 / factor
@@ -1957,6 +1966,19 @@ class FloorplanCanvas(QGraphicsView):
         # 执行缩放
         self.scale(factor, factor)
 
+        # 补偿标记点尺寸：使标记点在屏幕上保持固定像素大小
+        # 缩放 factor 后，场景坐标系被放大 factor 倍
+        # 需要将标记点场景半径除以 factor 以抵消视觉放大
+        for item in self.marker_items.values():
+            if not isinstance(item, QGraphicsEllipseItem):
+                continue
+            rect = item.rect()
+            center_x = rect.x() + rect.width() / 2
+            center_y = rect.y() + rect.height() / 2
+            # 场景半径除以 factor，保持屏幕像素半径不变
+            new_r = (rect.width() / 2) / factor
+            item.setRect(center_x - new_r, center_y - new_r, new_r * 2, new_r * 2)
+
         # 计算缩放后该场景坐标在视图中的新位置
         new_view_pos = self.mapFromScene(old_scene_pos)
 
@@ -1964,6 +1986,22 @@ class FloorplanCanvas(QGraphicsView):
         delta = new_view_pos - mouse_pos
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + delta.x())
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + delta.y())
+
+    def set_marker_pixel_radius(self, radius: int):
+        """设置标记点屏幕像素半径（缩放时保持固定屏幕尺寸）"""
+        self._marker_pixel_radius = max(4, min(48, radius))
+        # 重新应用到现有标记点
+        for item in self.marker_items.values():
+            if not isinstance(item, QGraphicsEllipseItem):
+                continue
+            rect = item.rect()
+            center_x = rect.x() + rect.width() / 2
+            center_y = rect.y() + rect.height() / 2
+            item.setRect(center_x - self._marker_pixel_radius, center_y - self._marker_pixel_radius,
+                         self._marker_pixel_radius * 2, self._marker_pixel_radius * 2)
+
+    def get_marker_pixel_radius(self) -> int:
+        return self._marker_pixel_radius
 
 
 # =============================================================================
@@ -1987,6 +2025,7 @@ class FloatingToolbar(QFrame):
     sector_clicked = pyqtSignal()
     adjust_clicked = pyqtSignal()
     set_all_clicked = pyqtSignal()
+    marker_size_changed = pyqtSignal(int)  # 标记点尺寸变化信号
 
     def __init__(self, parent=None, settings=None):
         super().__init__(parent)
@@ -2005,6 +2044,7 @@ class FloatingToolbar(QFrame):
                 'relink': True, 'delete': True, 'sector': True,
                 'adjust': True, 'set_all': True,
             },
+            'marker_size': 24,  # 标记点直径 (px)
             'position': {'x': 10, 'y': 70},
         }
 
@@ -2015,6 +2055,7 @@ class FloatingToolbar(QFrame):
             'button_visibility': {
                 key: btn.isVisible() for key, btn in self.buttons.items()
             },
+            'marker_size': self._settings.get('marker_size', 24),
             'position': {'x': self.x(), 'y': self.y()},
         }
 
@@ -2100,6 +2141,18 @@ class FloatingToolbar(QFrame):
         if is_vertical:
             layout.addStretch()
 
+            # 标记点大小滑块
+            size_label = QLabel(" 标记点直径")
+            size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(size_label)
+            
+            size_slider = QSlider(Qt.Orientation.Horizontal)
+            size_slider.setRange(8, 48)
+            size_slider.setValue(self._settings.get('marker_size', 24))
+            size_slider.setToolTip("调整平面图上标记点的显示直径")
+            size_slider.valueChanged.connect(self._on_marker_size_changed)
+            layout.addWidget(size_slider)
+
         # 恢复按钮的启用状态：如果父窗口实现了 _update_floating_toolbar，让父窗口来设置状态
         parent = self.parent()
         if parent and hasattr(parent, '_update_floating_toolbar'):
@@ -2124,6 +2177,23 @@ class FloatingToolbar(QFrame):
             self.adjust_clicked.emit()
         elif key == 'set_all':
             self.set_all_clicked.emit()
+
+    def _on_marker_size_changed(self, value: int):
+        """标记点大小改变"""
+        self._settings['marker_size'] = value
+        # 通知父窗口更新画布 - 通过父级的父级(主窗口)查找 canvas
+        parent = self.parent()
+        if parent:
+            # 尝试在父级的所有子控件中查找 FloorplanCanvas
+            from PyQt6.QtWidgets import QApplication
+            for widget in parent.findChildren(QApplication.activeWindow().__class__):
+                pass  # 不需要遍历，直接找父级的 parent
+            # 直接找主窗口
+            main_win = parent.parent()
+            if main_win and hasattr(main_win, 'canvas'):
+                main_win.canvas.set_marker_pixel_radius(value // 2)
+            elif hasattr(parent, 'canvas'):
+                parent.canvas.set_marker_pixel_radius(value // 2)
 
     def set_button_enabled(self, key: str, enabled: bool):
         """由父窗口调用以设置某个按钮的启用状态。"""
@@ -2665,6 +2735,217 @@ class StyleManager:
                 """)
 
 
+
+class MergeProjectsDialog(QDialog):
+    """合并项目对话框 - 支持拖拽文件夹/ZIP 到列表中"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("合并项目数据包")
+        self.resize(750, 550)
+        self._sources = []  # [(path, is_zip), ...]
+        self._init_ui()
+        # 启用整个对话框的拖拽接收
+        self.setAcceptDrops(True)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # ===== 源项目列表（支持拖拽） =====
+        source_group = QGroupBox("源项目（支持拖拽文件夹或 ZIP 到列表中）")
+        source_layout = QVBoxLayout(source_group)
+
+        self.source_list = QListWidget()
+        self.source_list.setMinimumHeight(180)
+        self.source_list.setAlternatingRowColors(True)
+        self.source_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #D1D1D6;
+                border-radius: 6px;
+                background-color: #F5F5F7;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #E5E5EA;
+            }
+            QListWidget::item:alternate {
+                background-color: #FFFFFF;
+            }
+            QListWidget::item:selected {
+                background-color: #0A84FF;
+                color: white;
+            }
+        """)
+        source_layout.addWidget(self.source_list)
+
+        btn_layout = QHBoxLayout()
+        add_folder_btn = QPushButton("📁 添加文件夹")
+        add_folder_btn.clicked.connect(self._add_folder)
+        add_zip_btn = QPushButton("📦 添加 ZIP")
+        add_zip_btn.clicked.connect(self._add_zip)
+        remove_btn = QPushButton("🗑️ 移除选中")
+        remove_btn.clicked.connect(self._remove_selected)
+        clear_btn = QPushButton("🧹 清空全部")
+        clear_btn.clicked.connect(self._clear_all)
+        btn_layout.addWidget(add_folder_btn)
+        btn_layout.addWidget(add_zip_btn)
+        btn_layout.addWidget(remove_btn)
+        btn_layout.addWidget(clear_btn)
+        btn_layout.addStretch()
+        source_layout.addLayout(btn_layout)
+
+        layout.addWidget(source_group)
+
+        # ===== 输出设置 =====
+        output_group = QGroupBox("输出设置")
+        output_layout = QGridLayout(output_group)
+
+        output_layout.addWidget(QLabel("项目名称:"), 0, 0)
+        self.project_name_edit = QLineEdit("合并项目")
+        output_layout.addWidget(self.project_name_edit, 0, 1)
+
+        output_layout.addWidget(QLabel("输出目录:"), 1, 0)
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("点击浏览选择输出目录...")
+        self.output_dir_edit.setReadOnly(True)
+        output_layout.addWidget(self.output_dir_edit, 1, 1)
+
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(self._browse_output_dir)
+        output_layout.addWidget(browse_btn, 1, 2)
+
+        output_layout.addWidget(QLabel("输出类型:"), 2, 0)
+        self.output_type_combo = QComboBox()
+        self.output_type_combo.addItem("管理端项目（可继续编辑）", "project")
+        self.output_type_combo.addItem("独立查看包（双击运行）", "viewer")
+        output_layout.addWidget(self.output_type_combo, 2, 1)
+
+        self.auto_export_cb = QCheckBox("合并完成后自动导出独立查看包（仅管理端项目有效）")
+        self.auto_export_cb.setChecked(False)
+        output_layout.addWidget(self.auto_export_cb, 3, 0, 1, 3)
+
+        layout.addWidget(output_group)
+
+        # 提示
+        hint = QLabel("💡 提示：可直接从文件资源管理器拖拽文件夹或 ZIP 文件到上方列表中")
+        hint.setStyleSheet("color: #8E8E93; font-size: 12px;")
+        layout.addWidget(hint)
+
+        # 按钮
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        ok_btn = QPushButton("确定")
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                padding: 8px 24px;
+                background-color: #007AFF;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #0056CC; }
+        """)
+        ok_btn.clicked.connect(self._on_ok)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addWidget(ok_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+
+    # -------------------------------------------------------------------------
+    # 拖拽支持
+    # -------------------------------------------------------------------------
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        for url in urls:
+            path = url.toLocalFile()
+            if os.path.isdir(path):
+                self._add_source(path, is_zip=False)
+            elif path.lower().endswith('.zip'):
+                self._add_source(path, is_zip=True)
+        event.acceptProposedAction()
+
+    # -------------------------------------------------------------------------
+    # 内部方法
+    # -------------------------------------------------------------------------
+    def _add_source(self, path, is_zip):
+        norm_path = os.path.normpath(path)
+        for existing_path, _ in self._sources:
+            if os.path.normpath(existing_path) == norm_path:
+                return
+        self._sources.append((path, is_zip))
+        display = f"📁 {path}" if not is_zip else f"📦 {path}"
+        item = QListWidgetItem(display)
+        item.setData(Qt.ItemDataRole.UserRole, (path, is_zip))
+        item.setToolTip(path)
+        self.source_list.addItem(item)
+
+    def _add_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "选择项目文件夹")
+        if path:
+            self._add_source(path, is_zip=False)
+
+    def _add_zip(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 ZIP 文件", "", "ZIP 文件 (*.zip)")
+        if path:
+            self._add_source(path, is_zip=True)
+
+    def _remove_selected(self):
+        for item in self.source_list.selectedItems():
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data in self._sources:
+                self._sources.remove(data)
+            self.source_list.takeItem(self.source_list.row(item))
+
+    def _clear_all(self):
+        self._sources.clear()
+        self.source_list.clear()
+
+    def _browse_output_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        if path:
+            self.output_dir_edit.setText(path)
+
+    def _on_ok(self):
+        if not self._sources:
+            QMessageBox.warning(self, "提示", "请至少添加一个源项目")
+            return
+        if not self.output_dir_edit.text():
+            QMessageBox.warning(self, "提示", "请选择输出目录")
+            return
+        if not self.project_name_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请输入项目名称")
+            return
+        self.accept()
+
+    # -------------------------------------------------------------------------
+    # 数据接口（供 _merge_projects 调用）
+    # -------------------------------------------------------------------------
+    def get_sources(self):
+        return self._sources
+
+    def get_output_dir(self):
+        return self.output_dir_edit.text()
+
+    def get_project_name(self):
+        return self.project_name_edit.text().strip()
+
+    def get_output_type(self):
+        return self.output_type_combo.currentData()
+
+    def get_auto_export(self):
+        return self.auto_export_cb.isChecked()
+
+
 class PanoramaManager(QMainWindow):
     # 方向更新信号（从HTTP服务器线程传递到主线程）
     direction_update = pyqtSignal(str, float)
@@ -2765,6 +3046,10 @@ class PanoramaManager(QMainWindow):
             lambda: self._toggle_adjust_mode(self.current_marker.id) if hasattr(self, 'current_marker') and self.current_marker else None
         )
         self.floating_toolbar.set_all_clicked.connect(self._set_all_sectors_direction)
+        # 标记点尺寸变化
+        self.floating_toolbar.marker_size_changed.connect(self._on_marker_size_changed)
+        # 应用初始标记点尺寸
+        self._on_marker_size_changed(self._toolbar_settings.get('marker_size', 24))
         
         # 画布操作提示
         self.canvas_hint = QLabel("💡 左键拖动点位移动 | 右键点击点位弹出菜单 | 滚轮缩放 | 左键拖拽空白处平移")
@@ -2963,7 +3248,7 @@ class PanoramaManager(QMainWindow):
             QPushButton:hover { background-color: #d63025; }
             QPushButton:disabled { background-color: #CCC; }
         """)
-        self.export_standalone_btn.clicked.connect(self._export_standalone_viewer)
+        self.export_standalone_btn.clicked.connect(lambda: self._export_standalone_viewer())
         actions_layout.addWidget(self.export_standalone_btn)
         
         # 服务器信息展开按钮（默认隐藏服务器信息）
@@ -3206,7 +3491,7 @@ class PanoramaManager(QMainWindow):
         
         # 视线方向控制
         marker_info_layout.addWidget(QLabel("视线方向:"), 8, 0)
-        self.direction_label = QLabel("-90°")
+        self.direction_label = QLabel("0°")
         self.direction_label.setStyleSheet("font-weight: bold; color: #0A84FF; font-size: 14px;")
         marker_info_layout.addWidget(self.direction_label, 8, 1)
         
@@ -3843,8 +4128,15 @@ class PanoramaManager(QMainWindow):
         
         # 导出独立查看包菜单
         export_standalone_action = QAction("导出独立查看包(&V)...", self)
-        export_standalone_action.triggered.connect(self._export_standalone_viewer)
+        export_standalone_action.triggered.connect(lambda: self._export_standalone_viewer())
         file_menu.addAction(export_standalone_action)
+        
+        file_menu.addSeparator()
+        
+        # 合并项目数据包菜单
+        merge_projects_action = QAction("合并项目数据包(&M)...", self)
+        merge_projects_action.triggered.connect(self._merge_projects)
+        file_menu.addAction(merge_projects_action)
         
         file_menu.addSeparator()
         
@@ -4180,8 +4472,8 @@ class PanoramaManager(QMainWindow):
             for floor_data in self.project_data.floors:
                 for marker_data in floor_data.get('markers', []):
                     if 'direction' not in marker_data or marker_data.get('direction') is None:
-                        marker_data['direction'] = -90.0
-                        print(f"[调试] 点位 {marker_data.get('customName') or marker_data.get('id')} 无 direction，设为默认 -90°")
+                        marker_data['direction'] = 0.0
+                        print(f"[调试] 点位 {marker_data.get('customName') or marker_data.get('id')} 无 direction，设为默认 0°")
                     else:
                         print(f"[调试] 点位 {marker_data.get('customName') or marker_data.get('id')} 已有 direction={marker_data.get('direction')}°，保持不变")
             
@@ -4381,7 +4673,7 @@ class PanoramaManager(QMainWindow):
         threshold = self._detect_photo_source_threshold(photo_dir)
         
         # 启动导入线程
-        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '') or photo_dir
+        photo_base_dir = self._safe_photo_base_dir() or photo_dir
         self.import_thread = PhotoImportThread(
             self.project_dir, photo_dir, self.project_data.floors, 
             time_offset, use_exif=True, threshold=threshold,
@@ -4725,7 +5017,7 @@ class PanoramaManager(QMainWindow):
             print(f"[调试] 目录创建成功: {viewer_dir}")
             
             # 处理外部照片目录（不复制照片）
-            photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+            photo_base_dir = self._safe_photo_base_dir()
             external_photos_link = os.path.join(viewer_dir, 'external_photos')
             
             if photo_base_dir and os.path.exists(photo_base_dir):
@@ -4831,7 +5123,7 @@ class PanoramaManager(QMainWindow):
             self.stop_http_server()
         
         # 获取照片根目录，传递给 HTTP 服务器用于 direct mapping
-        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '') if self.project_data else ''
+        photo_base_dir = self._safe_photo_base_dir()
         print(f"[调试] photo_base_dir: {photo_base_dir}")
         
         # 尝试不同端口（跳过 8080，因为经常被占用）
@@ -4940,9 +5232,9 @@ class PanoramaManager(QMainWindow):
             self.delete_marker_btn.setEnabled(True)
             
             # 新增：更新视线方向
-            direction = getattr(self.current_marker, 'direction', -90.0)
+            direction = getattr(self.current_marker, 'direction', 0.0)
             if direction is None:
-                direction = -90.0
+                direction = 0.0
             self.direction_label.setText(f"{direction:.0f}°")
             
             # 新增：更新照片预览
@@ -5092,7 +5384,7 @@ class PanoramaManager(QMainWindow):
             os.makedirs(viewer_dir, exist_ok=True)
             
             # 处理外部照片目录（不复制照片）
-            photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+            photo_base_dir = self._safe_photo_base_dir()
             external_photos_link = os.path.join(viewer_dir, 'external_photos')
             
             if photo_base_dir and os.path.exists(photo_base_dir):
@@ -5186,9 +5478,9 @@ class PanoramaManager(QMainWindow):
                 current_id = current['id']
                 current_x = current.get('x', 0)
                 current_y = current.get('y', 0)
-                current_dir = current.get('direction', -90.0)
+                current_dir = current.get('direction', 0.0)
                 if current_dir is None:
-                    current_dir = -90.0
+                    current_dir = 0.0
 
                 hotspots = []
 
@@ -5216,9 +5508,9 @@ class PanoramaManager(QMainWindow):
                     if azimuth < 0:
                         azimuth += 360
 
-                    # 当前朝向：direction=-90(上/北) → heading=0(北)
-                    # direction=0(右/东) → heading=90(东)
-                    heading = (current_dir + 90) % 360
+                    # 当前朝向：direction=0(上/北) → heading=0(北)
+                    # direction=90(右/东) → heading=90(东)
+                    heading = current_dir % 360
 
                     # 相对全景角度：目标方位角 - 当前朝向
                     relative_yaw = azimuth - heading
@@ -5240,18 +5532,18 @@ class PanoramaManager(QMainWindow):
                         perspective_ratio = min(1.0, perspective_ratio * 1.3)
 
                     target_name = target.get('customName') if target.get('customName') else target.get('id', '')
+                    target_photos = target.get('photos') or []
+                    target_photo_count = len(target_photos) or (1 if target.get('panoramaPath') else 0)
 
                     hotspots.append({
                         'targetId': target['id'],
                         'targetName': target_name,
                         'yaw': round(relative_yaw, 2),
-                        # pitch 由前端根据 vanishingPointPitch 配置实时计算
-                        # 公式: pitch = -85 + perspectiveRatio * (vanishingPointPitch + 85)
                         'distance': round(distance, 4),
-                        # 透视比例：0=最近，1=最远
                         'perspectiveRatio': round(perspective_ratio, 4),
                         'isBehind': is_behind,
-                        'maxDistance': round(max_floor_distance, 4)
+                        'maxDistance': round(max_floor_distance, 4),
+                        'photoCount': target_photo_count
                     })
 
                 # 按透视比例排序（近的优先显示）
@@ -5276,7 +5568,7 @@ class PanoramaManager(QMainWindow):
             floorplan_path = f"floorplan_{floor_id}.jpg"
             
             # 收集该楼层所有标记点（不限制状态，让查看器显示所有点位）
-            photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+            photo_base_dir = self._safe_photo_base_dir()
             all_markers = []
             # 为该楼层计算漫游热点（每个已关联点指向其他已关联点）
             floor_linked_markers = [m for m in floor_data.get('markers', []) 
@@ -5300,8 +5592,7 @@ class PanoramaManager(QMainWindow):
                             'distance': h['distance'],
                             'isBehind': h['isBehind'],
                             'perspectiveRatio': h.get('perspectiveRatio', 0),
-                            # 时空转换点：目标点位的照片数量决定环层数
-                            'photoCount': len(target.get('photos', [])) or (1 if target.get('panoramaPath') else 0)
+                            'photoCount': h.get('photoCount', 1)
                         }
                         for h in hs_list
                     ]
@@ -5965,8 +6256,8 @@ class PanoramaManager(QMainWindow):
         function enterAlignMode(marker, compass, label, hintBar) {
             // 1. 记录当前状态
             const currentDir = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') 
-                ? parseFloat(marker.direction) : -90;
-            const currentHeading = normalizeAngle(currentDir + 90);
+                ? parseFloat(marker.direction) : 0;
+            const currentHeading = normalizeAngle(currentDir);
             
             compassAlignState = {
                 isAligning: true,
@@ -6007,10 +6298,8 @@ class PanoramaManager(QMainWindow):
             // 1. 获取当前全景视角
             const currentYaw = viewer.getYaw();
             
-            // 2. 计算新方向：当前全景的 yaw 就是新的 heading
-            // 新 direction = heading - 90（因为 direction=-90 对应 heading=0/北）
-            const newHeading = currentYaw;
-            const newDirection = normalizeAngle(newHeading - 90);
+            // 2. 计算新方向：当前全景的 yaw 就是新的 direction（direction=0 表示正北）
+            const newDirection = normalizeAngle(currentYaw);
             
             // 3. 计算变化量（用于日志）
             const delta = normalizeAngle(newDirection - compassAlignState.lockedDirection);
@@ -6219,7 +6508,7 @@ class PanoramaManager(QMainWindow):
             // 热点样式
             hotspotStyle: 'blackhole',
             // 最大显示热点数（0=不限，默认3个）
-            maxVisibleHotspots: 3,
+            maxVisibleHotspots: 1,
             // 调试
             debugLog: false
         };
@@ -6242,7 +6531,7 @@ class PanoramaManager(QMainWindow):
                         // 兼容旧配置：给新字段设置默认值
                         if (!parsed.hasOwnProperty('vanishingPointPitch')) RoamConfig.vanishingPointPitch = -15;
                         if (!parsed.hasOwnProperty('hotspotStyle')) RoamConfig.hotspotStyle = 'blackhole';
-                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 3;
+                        if (!parsed.hasOwnProperty('maxVisibleHotspots')) RoamConfig.maxVisibleHotspots = 1;
                         if (!parsed.hasOwnProperty('spacingDensity')) RoamConfig.spacingDensity = 0.3;
                         if (!parsed.hasOwnProperty('horizontalSpread')) RoamConfig.horizontalSpread = 1.0;
                         if (RoamConfig.debugLog) console.log('[配置] 已从 localStorage 加载保存的设置');
@@ -6453,6 +6742,7 @@ class PanoramaManager(QMainWindow):
 
         // 全局缩放状态
         let currentScale = 1;
+        window.currentScale = 1;
         let currentOffsetX = 0;
         let currentOffsetY = 0;
         let isDragging = false;
@@ -6508,7 +6798,7 @@ class PanoramaManager(QMainWindow):
                 wrapper.dataset.imgNaturalWidth = img.naturalWidth;
                 wrapper.dataset.imgNaturalHeight = img.naturalHeight;
                 
-                renderMarkers(overlay, floor.markers);
+                renderMarkers(overlay, floor.markers, displayedWidth, displayedHeight);
                 addZoomControls(container);
                 addZoomEvents(wrapper, img, floor.markers);
                 renderSectors(overlay, floor.markers, displayedWidth, displayedHeight);
@@ -6517,17 +6807,21 @@ class PanoramaManager(QMainWindow):
             img.onerror = () => { container.innerHTML = '<p style="color: #666;">平面图加载失败</p>'; };
         }
 
-        function renderMarkers(overlay, markers) {
+        function renderMarkers(overlay, markers, baseWidth, baseHeight) {
+            const scale = window.currentScale || 1;
             overlay.querySelectorAll('.marker-dot').forEach(dot => dot.remove());
             markers.forEach((marker, idx) => {
                 const dot = document.createElement('div');
                 const statusClass = marker.status || 'pending';
                 dot.className = 'marker-dot ' + statusClass + (idx === 0 ? ' active' : '');
                 dot.style.position = 'absolute';
-                dot.style.left = (marker.x * 100) + '%';
-                dot.style.top = (marker.y * 100) + '%';
+                // 坐标乘以缩放比例，匹配图片视觉位置
+                dot.style.left = (marker.x * baseWidth * scale) + 'px';
+                dot.style.top = (marker.y * baseHeight * scale) + 'px';
                 dot.style.pointerEvents = 'auto';
                 dot.dataset.markerIndex = idx;
+                dot.style.transform = 'translate(-50%, -50%)';
+                dot.style.transformOrigin = 'center center';
                 dot.onclick = function(e) {
                     e.stopPropagation();
                     loadPanorama(idx);
@@ -6536,7 +6830,8 @@ class PanoramaManager(QMainWindow):
             });
         }
 
-        function renderSectors(overlay, markers, displayedWidth, displayedHeight) {
+        function renderSectors(overlay, markers, baseWidth, baseHeight) {
+            const scale = window.currentScale || 1;
             overlay.querySelectorAll('.sector-svg').forEach(s => s.remove());
             const sectorAngle = 90;
             const radius = 30;
@@ -6558,11 +6853,11 @@ class PanoramaManager(QMainWindow):
                     } else { return; }
                 }
                 
-                const cx = marker.x * displayedWidth;
-                const cy = marker.y * displayedHeight;
+                const cx = marker.x * baseWidth * scale;
+                const cy = marker.y * baseHeight * scale;
                 const ang = direction;
                 const half = sectorAngle / 2;
-                const startAngDeg = -(ang + half);
+                const startAngDeg = -(ang + half) + 90;
                 const startAng = startAngDeg * Math.PI / 180;
                 const endAng = (startAngDeg + sectorAngle) * Math.PI / 180;
                 
@@ -6571,11 +6866,11 @@ class PanoramaManager(QMainWindow):
                 svg.style.position = 'absolute';
                 svg.style.left = '0';
                 svg.style.top = '0';
-                svg.style.width = '100%';
-                svg.style.height = '100%';
+                svg.style.width = (baseWidth * scale) + 'px';
+                svg.style.height = (baseHeight * scale) + 'px';
                 svg.style.pointerEvents = 'none';
                 svg.style.zIndex = '5';
-                svg.setAttribute('viewBox', '0 0 ' + displayedWidth + ' ' + displayedHeight);
+                svg.setAttribute('viewBox', '0 0 ' + (baseWidth * scale) + ' ' + (baseHeight * scale));
                 
                 const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
                 const r = radius;
@@ -6614,6 +6909,7 @@ class PanoramaManager(QMainWindow):
                     currentOffsetX = mouseX - (mouseX - currentOffsetX) * scaleRatio;
                     currentOffsetY = mouseY - (mouseY - currentOffsetY) * scaleRatio;
                     currentScale = newScale;
+                    window.currentScale = currentScale;  // 更新全局变量供标记点使用
                     applyTransform(wrapper, img, markers);
                 }
             }, { passive: false });
@@ -6695,31 +6991,37 @@ class PanoramaManager(QMainWindow):
         }
 
         function applyTransform(wrapper, img, markers) {
+            // 只缩放图片，overlay 保持 1:1，避免子元素变换原点错位
             img.style.transform = 'translate(' + currentOffsetX + 'px, ' + currentOffsetY + 'px) scale(' + currentScale + ')';
             const overlay = document.getElementById('floorplanOverlay');
             if (overlay) {
-                overlay.style.transform = 'translate(' + currentOffsetX + 'px, ' + currentOffsetY + 'px) scale(' + currentScale + ')';
+                // overlay 只做平移，不缩放，保持 1:1 像素坐标系
+                overlay.style.transform = 'translate(' + currentOffsetX + 'px, ' + currentOffsetY + 'px)';
             }
-            const displayedWidth = parseFloat(wrapper.dataset.displayedWidth);
-            const displayedHeight = parseFloat(wrapper.dataset.displayedHeight);
-            renderSectors(overlay, markers, displayedWidth, displayedHeight);
+            // 传递基础显示尺寸（不含缩放），overlay 坐标系始终是基础图片尺寸
+            const baseWidth = parseFloat(wrapper.dataset.displayedWidth);
+            const baseHeight = parseFloat(wrapper.dataset.displayedHeight);
+            renderMarkers(overlay, markers, baseWidth, baseHeight);
+            renderSectors(overlay, markers, baseWidth, baseHeight);
         }
 
-        function zoomIn() {
+function zoomIn() {
             const wrapper = document.getElementById('floorplanWrapper');
             if (!wrapper) return;
             const img = document.getElementById('floorplanImg');
             const floor = floors[currentFloorIndex];
             currentScale = Math.min(5, currentScale * 1.25);
+            window.currentScale = currentScale;
             applyTransform(wrapper, img, floor.markers);
         }
-
+        
         function zoomOut() {
             const wrapper = document.getElementById('floorplanWrapper');
             if (!wrapper) return;
             const img = document.getElementById('floorplanImg');
             const floor = floors[currentFloorIndex];
             currentScale = Math.max(0.5, currentScale / 1.25);
+            window.currentScale = currentScale;
             if (currentScale < 1.01 && currentScale > 0.99) {
                 currentScale = 1;
                 currentOffsetX = 0;
@@ -6734,6 +7036,7 @@ class PanoramaManager(QMainWindow):
             const img = document.getElementById('floorplanImg');
             const floor = floors[currentFloorIndex];
             currentScale = 1;
+            window.currentScale = currentScale;
             currentOffsetX = 0;
             currentOffsetY = 0;
             applyTransform(wrapper, img, floor.markers);
@@ -6775,7 +7078,7 @@ class PanoramaManager(QMainWindow):
                 label.textContent = '点击对齐方向';
                 hintBar.classList.remove('show');
                 compassAlignState.isAligning = false;
-                startDirectionSync(floor.markers[currentMarkerIndex]);
+                startDirectionSync(floor.markers[index]);
             }
             
             currentMarkerIndex = index;
@@ -6875,6 +7178,12 @@ class PanoramaManager(QMainWindow):
                 config.pitch = window._preservedView.pitch;
                 console.log('[智能朝向] 应用 preserved yaw:', config.yaw, 'pitch:', config.pitch);
                 window._preservedView = null;
+            } else {
+                // 统一初始方向：根据 marker.direction 计算正北基准 yaw（direction=0 表示正北）
+                const baseDirection = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '')
+                    ? parseFloat(marker.direction) : 0;
+                config.yaw = normalizeAngle(baseDirection);
+                console.log('[初始方向] 应用 marker.direction:', baseDirection, 'yaw:', config.yaw);
             }
             
             if (photos.length === 4) {
@@ -6903,9 +7212,9 @@ class PanoramaManager(QMainWindow):
             }
             
             let baseDirection = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') 
-                ? parseFloat(marker.direction) : -90;
-            let initialYaw = null;
-            currentSectorDirection = null;
+                ? parseFloat(marker.direction) : 0;
+            let initialYaw = normalizeAngle(baseDirection);
+            currentSectorDirection = baseDirection;
             
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
@@ -6922,12 +7231,7 @@ class PanoramaManager(QMainWindow):
                     return;
                 }
                 
-                if (initialYaw === null) {
-                    initialYaw = yaw;
-                    console.log('[全景] 初始视角 yaw:', yaw, '基准方向:', baseDirection);
-                    return;
-                }
-                let delta = yaw - initialYaw;
+                let delta = normalizeAngle(yaw - initialYaw);
                 if (Math.abs(delta) < 1) return;
                 let newDirection = baseDirection + delta;
                 newDirection = ((newDirection + 180) % 360 + 360) % 360 - 180;
@@ -6984,6 +7288,29 @@ class PanoramaManager(QMainWindow):
                     if (RoamConfig.debugLog) console.log('[预加载] 已触发相邻场景预加载');
                 }, RoamConfig.preloadDelay);
             }
+            
+            startDirectionSync(marker);
+        }
+
+        function startDirectionSync(marker) {
+            if (window._compassInterval) {
+                clearInterval(window._compassInterval);
+                window._compassInterval = null;
+            }
+            const arrow = document.getElementById('compassArrow');
+            if (!arrow) return;
+            window._compassInterval = setInterval(() => {
+                if (!viewer) {
+                    clearInterval(window._compassInterval);
+                    window._compassInterval = null;
+                    return;
+                }
+                try {
+                    const yaw = viewer.getYaw();
+                    // arrow 默认朝上（北），yaw 增加表示向右转，指北针需反向旋转以始终指向北
+                    arrow.style.transform = 'rotate(' + (-yaw) + 'deg)';
+                } catch (e) {}
+            }, 100);
         }
 
         function showPhotoViewer(marker, photos) {
@@ -6993,6 +7320,7 @@ class PanoramaManager(QMainWindow):
             var roamInd = document.getElementById('roamIndicator');
             if (roamInd) roamInd.style.display = 'none';
             
+            if (window._compassInterval) { clearInterval(window._compassInterval); window._compassInterval = null; }
             const photoViewer = document.getElementById('photoViewer');
             photoViewer.classList.add('active');
             currentPhotoIndex = 0;
@@ -7340,8 +7668,8 @@ class PanoramaManager(QMainWindow):
                     var prevYaw = viewer.getYaw();
                     var prevPitch = viewer.getPitch();
                     var currentDir = (currentMarker.direction !== null && currentMarker.direction !== undefined)
-                        ? parseFloat(currentMarker.direction) : -90;
-                    var currentHeading = normalizeAngle(currentDir + 90);
+                        ? parseFloat(currentMarker.direction) : 0;
+                    var currentHeading = normalizeAngle(currentDir);
                     var userOffset = normalizeAngle(prevYaw - currentHeading);
                     var moveAzimuth = getMoveAzimuth(currentMarker, targetMarker);
                     window._preservedView = {
@@ -7368,8 +7696,8 @@ class PanoramaManager(QMainWindow):
                     var prevYaw = viewer.getYaw();
                     var prevPitch = viewer.getPitch();
                     var currentDir = (currentMarker.direction !== null && currentMarker.direction !== undefined)
-                        ? parseFloat(currentMarker.direction) : -90;
-                    var currentHeading = normalizeAngle(currentDir + 90);
+                        ? parseFloat(currentMarker.direction) : 0;
+                    var currentHeading = normalizeAngle(currentDir);
                     var userOffset = normalizeAngle(prevYaw - currentHeading);
                     var moveAzimuth = getMoveAzimuth(currentMarker, targetMarker);
                     window._preservedView = {
@@ -7704,8 +8032,8 @@ function jumpToMarker(targetId) {
                     var prevPitch = viewer.getPitch();
                     
                     var currentDir = (currentMarker.direction !== null && currentMarker.direction !== undefined)
-                        ? parseFloat(currentMarker.direction) : -90;
-                    var currentHeading = normalizeAngle(currentDir + 90);
+                        ? parseFloat(currentMarker.direction) : 0;
+                    var currentHeading = normalizeAngle(currentDir);
                     var userOffset = normalizeAngle(prevYaw - currentHeading);
                     var moveAzimuth = getMoveAzimuth(currentMarker, targetMarker);
                     
@@ -7787,7 +8115,7 @@ function jumpToMarker(targetId) {
             time.sleep(1.0)
         
         # 获取照片根目录，传递给 HTTP 服务器用于 direct mapping
-        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '') if self.project_data else ''
+        photo_base_dir = self._safe_photo_base_dir()
         
         # 尝试不同端口（跳过 8080，因为经常被占用）
         for port in [8888, 9000, 9999, 0]:
@@ -8001,7 +8329,7 @@ function jumpToMarker(targetId) {
                     'endTime': '',
                     'panoramaPath': '',
                     'originalPhotoPath': '',
-                    'direction': -90.0  # 新采集点默认朝上
+                    'direction': 0.0  # 新采集点默认朝上（正北）
                 }
                 floor_data.setdefault('markers', []).append(new_marker)
                 self.canvas.add_marker(new_id, norm_x, norm_y, 'pending', new_id)
@@ -8060,10 +8388,14 @@ function jumpToMarker(targetId) {
             traceback.print_exc()
 
 
+    def _safe_photo_base_dir(self) -> str:
+        val = getattr(self.project_data, 'photoBaseDir', '')
+        return val if isinstance(val, str) else ''
+
     def _find_photo_base_dir(self, search_dir: str = None) -> str:
         """智能查找照片根目录：优先 photoBaseDir，其次扫描指定目录或项目附近的照片文件夹"""
         # 1. 优先使用已设置的 photoBaseDir
-        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+        photo_base_dir = self._safe_photo_base_dir()
         if photo_base_dir and os.path.exists(photo_base_dir):
             return photo_base_dir
         
@@ -8339,9 +8671,9 @@ function jumpToMarker(targetId) {
                 target_marker['_prev_direction'] = current_direction
                 target_marker['direction'] = None
             else:
-                # 当前无扇形，显示它：恢复 _prev_direction 或默认 -90
+                # 当前无扇形，显示它：恢复 _prev_direction 或默认 0（正北）
                 prev = target_marker.pop('_prev_direction', None)
-                target_marker['direction'] = prev if prev is not None else -90.0
+                target_marker['direction'] = prev if prev is not None else 0.0
             
             # 只刷新该点位的椭圆 item 的 direction 数据，不重建整个画布
             item = self.canvas.marker_items.get(marker_id)
@@ -8366,10 +8698,10 @@ function jumpToMarker(targetId) {
                         marker_data['_prev_direction'] = marker_data['direction']
                         marker_data['direction'] = None
             else:
-                # 全部开启：恢复之前保存的值，或设为默认值 -90
+                # 全部开启：恢复之前保存的值，或设为默认值 0（正北）
                 for marker_data in current_floor_data.get('markers', []):
                     prev = marker_data.pop('_prev_direction', None)
-                    marker_data['direction'] = prev if prev is not None else -90.0
+                    marker_data['direction'] = prev if prev is not None else 0.0
             
             self.canvas.clear_markers()
             self._load_floor(self.current_floor_id)
@@ -8384,6 +8716,11 @@ function jumpToMarker(targetId) {
             QPushButton:hover { background-color: #B36800; }
         """)
         self.save_changes_btn.setText("💾 保存修改（已变更）")
+    
+    def _on_marker_size_changed(self, diameter: int):
+        """标记点直径变化"""
+        if hasattr(self, 'canvas'):
+            self.canvas.set_marker_pixel_radius(diameter // 2)
     
     def _delete_marker(self, marker_id: str):
         """删除采集点"""
@@ -8600,9 +8937,9 @@ function jumpToMarker(targetId) {
         for floor_data in self.project_data.floors:
             for marker_data in floor_data.get('markers', []):
                 if marker_data['id'] == marker_id:
-                    current_dir = marker_data.get('direction', -90.0)
+                    current_dir = marker_data.get('direction', 0.0)
                     if current_dir is None:
-                        current_dir = -90.0
+                        current_dir = 0.0
                     new_dir = (current_dir + angle_delta) % 360
                     if new_dir > 180:
                         new_dir -= 360
@@ -8654,8 +8991,8 @@ function jumpToMarker(targetId) {
         if not ok:
             return
         
-        # 转换：全景 yaw 0度（朝前）对应扇形 direction -90度（朝上，12点钟方向）
-        aligned_direction = (-current_yaw - 90) % 360
+        # 转换：全景 yaw 0度（朝前/正北）对应扇形 direction 0度（朝上，12点钟方向）
+        aligned_direction = current_yaw % 360
         if aligned_direction > 180:
             aligned_direction -= 360
         
@@ -8664,7 +9001,7 @@ function jumpToMarker(targetId) {
         for floor_data in self.project_data.floors:
             for marker_data in floor_data.get('markers', []):
                 if marker_data['id'] == marker_id:
-                    current_dir = marker_data.get('direction', -90.0) or -90.0
+                    current_dir = marker_data.get('direction', 0.0) or 0.0
                     delta = aligned_direction - current_dir
                     
                     marker_data['direction'] = aligned_direction
@@ -8809,8 +9146,8 @@ function jumpToMarker(targetId) {
         self._record_command('_set_all_sectors_direction')
         angle, ok = QInputDialog.getDouble(
             self, "调整全部方向",
-            "请输入固定角度（度）:\n-90=朝上, 0=朝右, 90=朝下, ±180=朝左",
-            value=-90, min=-180, max=180, decimals=1
+            "请输入固定角度（度）:\n0=朝上(北), 90=朝右(东), 180=朝下(南), -90=朝左(西)",
+            value=0, min=-180, max=180, decimals=1
         )
         if not ok:
             return
@@ -8869,7 +9206,7 @@ function jumpToMarker(targetId) {
 
     def _regenerate_viewer(self, viewer_dir: str):
         """静默重新生成查看器（只更新数据和HTML，不重建照片链接）"""
-        photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+        photo_base_dir = self._safe_photo_base_dir()
         
         # 只更新 project.json，不碰 external_photos
         project_copy = self.project_data.to_dict()
@@ -8967,19 +9304,33 @@ function jumpToMarker(targetId) {
             import traceback
             traceback.print_exc()
 
-    def _export_standalone_viewer(self):
+    def _export_standalone_viewer(self, export_dir=None):
         """导出独立查看包（双击即可查看，无需安装管理器）"""
         if not self.project_dir or not self.project_data:
             QMessageBox.warning(self, "提示", "请先加载项目")
             return
         
         try:
-            # 选择输出目录
-            export_dir = QFileDialog.getExistingDirectory(
-                self, "选择独立查看包输出目录", os.path.dirname(self.project_dir)
-            )
-            if not export_dir:
+            # 选择输出目录（如果未指定）
+            if export_dir is None:
+                export_dir = QFileDialog.getExistingDirectory(
+                    self, "选择独立查看包输出目录", os.path.dirname(self.project_dir)
+                )
+                if not export_dir or not isinstance(export_dir, str):
+                    return
+            
+            # 确保 export_dir 是字符串
+            if not isinstance(export_dir, str):
+                QMessageBox.critical(self, "错误", f"输出目录类型错误: {type(export_dir).__name__}")
                 return
+            
+            # 验证输出目录是否存在
+            if not os.path.exists(export_dir):
+                try:
+                    os.makedirs(export_dir, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"无法创建输出目录: {export_dir}\n错误: {e}")
+                    return
             
             # 使用项目名作为子目录
             project_name = self.project_data.projectName or "未命名项目"
@@ -9008,14 +9359,26 @@ function jumpToMarker(targetId) {
             progress.setValue(0)
             progress.show()
             
-            # 1. 复制外部照片到 viewer/external_photos/
-            photo_base_dir = getattr(self.project_data, 'photoBaseDir', '')
+            # 1. 复制照片到 viewer/photos/ 或 viewer/external_photos/
+            progress.setLabelText("正在复制照片...")
+            progress.setValue(10)
+            QApplication.processEvents()
+
+            # 1a. 复制项目目录中的 photos/ 文件夹（合并后的项目照片在这里）
+            src_photos_dir = os.path.join(self.project_dir, 'photos')
+            dst_photos_dir = os.path.join(viewer_dir, 'photos')
+            if os.path.exists(src_photos_dir):
+                os.makedirs(dst_photos_dir, exist_ok=True)
+                for f in os.listdir(src_photos_dir):
+                    src_file = os.path.join(src_photos_dir, f)
+                    if os.path.isfile(src_file) and f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                        shutil.copy2(src_file, os.path.join(dst_photos_dir, f))
+                print(f"[导出] 已复制 photos/ 目录: {src_photos_dir} -> {dst_photos_dir}")
+
+            # 1b. 复制外部照片到 viewer/external_photos/（原始照片目录）
+            photo_base_dir = self._safe_photo_base_dir()
             external_photos_dir = os.path.join(viewer_dir, 'external_photos')
             if photo_base_dir and os.path.exists(photo_base_dir):
-                progress.setLabelText("正在复制照片...")
-                progress.setValue(10)
-                QApplication.processEvents()
-                
                 for root, dirs, files in os.walk(photo_base_dir):
                     rel_root = os.path.relpath(root, photo_base_dir)
                     dst_root = os.path.join(external_photos_dir, rel_root) if rel_root != '.' else external_photos_dir
@@ -9023,6 +9386,20 @@ function jumpToMarker(targetId) {
                     for f in files:
                         if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                             shutil.copy2(os.path.join(root, f), os.path.join(dst_root, f))
+                print(f"[导出] 已复制 external_photos/ 目录: {photo_base_dir} -> {external_photos_dir}")
+
+            # 1c. 如果项目目录中有 external_photos/，也复制过来
+            src_external_dir = os.path.join(self.project_dir, 'external_photos')
+            if os.path.exists(src_external_dir):
+                os.makedirs(external_photos_dir, exist_ok=True)
+                for root, dirs, files in os.walk(src_external_dir):
+                    rel_root = os.path.relpath(root, src_external_dir)
+                    dst_root = os.path.join(external_photos_dir, rel_root) if rel_root != '.' else external_photos_dir
+                    os.makedirs(dst_root, exist_ok=True)
+                    for f in files:
+                        if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                            shutil.copy2(os.path.join(root, f), os.path.join(dst_root, f))
+                print(f"[导出] 已复制项目 external_photos/: {src_external_dir} -> {external_photos_dir}")
             
             progress.setValue(40)
             QApplication.processEvents()
@@ -9031,11 +9408,24 @@ function jumpToMarker(targetId) {
             progress.setLabelText("正在复制平面图...")
             for floor_data in self.project_data.floors:
                 floor_id = floor_data['id']
-                for ext in ['.jpg', '.png']:
-                    src = os.path.join(self.project_dir, f"floorplan_{floor_id}{ext}")
-                    if os.path.exists(src):
-                        shutil.copy2(src, os.path.join(viewer_dir, f"floorplan_{floor_id}{ext}"))
+                copied = False
+                # 搜索多个可能的位置
+                search_dirs = [
+                    self.project_dir,
+                    os.path.join(self.project_dir, 'viewer'),
+                ]
+                for search_dir in search_dirs:
+                    if copied:
                         break
+                    for ext in ['.jpg', '.jpeg', '.png']:
+                        src = os.path.join(search_dir, f"floorplan_{floor_id}{ext}")
+                        if os.path.exists(src):
+                            shutil.copy2(src, os.path.join(viewer_dir, f"floorplan_{floor_id}{ext}"))
+                            print(f"[导出] 已复制平面图: {src}")
+                            copied = True
+                            break
+                if not copied:
+                    print(f"[警告] 未找到楼层 {floor_id} 的平面图文件")
             
             progress.setValue(50)
             QApplication.processEvents()
@@ -9059,7 +9449,22 @@ function jumpToMarker(targetId) {
             
             # 生成查看器 HTML
             self._generate_viewer_html(viewer_dir)
-            
+
+            # 写入 project.json（保留完整项目数据，方便下次合并）
+            project_json_path = os.path.join(viewer_dir, 'project.json')
+            project_dict = self.project_data.to_dict()
+            # 确保所有路径使用正斜杠（浏览器兼容）
+            for floor in project_dict.get('floors', []):
+                for marker in floor.get('markers', []):
+                    for key in ['panoramaPath', 'originalPhotoPath']:
+                        if marker.get(key):
+                            marker[key] = marker[key].replace('\\', '/')
+                    if marker.get('photos'):
+                        marker['photos'] = [p.replace('\\', '/') for p in marker['photos']]
+            with open(project_json_path, 'w', encoding='utf-8') as f:
+                json.dump(project_dict, f, ensure_ascii=False, indent=2)
+            print(f"[导出] 已写入 project.json: {project_json_path}")
+
             # 替换 HTML 中的 CDN 引用为本地路径
             index_html = os.path.join(viewer_dir, 'index.html')
             if os.path.exists(index_html):
@@ -9133,16 +9538,892 @@ function jumpToMarker(targetId) {
                 msg += "\n\n⚠️ Pannellum 离线资源下载失败，查看包可能仍需要网络连接。"
             
             QMessageBox.information(self, "导出成功", msg)
-            
         except Exception as e:
-            QMessageBox.critical(self, "导出失败", f"错误: {e}")
+            import traceback
+            tb = traceback.format_exc()
+            print(tb)
+            QMessageBox.critical(self, "导出失败", f"错误: {e}\n\n{tb[:600]}")
+    
+
+    def _merge_projects(self):
+        """合并多个项目数据包/文件夹为一个新项目或独立查看包"""
+        dialog = MergeProjectsDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        sources = dialog.get_sources()
+        output_dir = dialog.get_output_dir()
+        project_name = dialog.get_project_name()
+        output_type = dialog.get_output_type()
+        auto_export = dialog.get_auto_export()
+
+        if output_type == "viewer":
+            self._merge_standalone_viewers(sources, output_dir, project_name)
+        else:
+            self._merge_into_project(sources, output_dir, project_name, auto_export=auto_export)
+
+    def _merge_into_project(self, sources, output_dir, project_name, auto_export=False):
+        """合并多个项目数据包为新的管理端项目"""
+        # 验证输出目录是否存在
+        if not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"无法创建输出目录: {output_dir}\n错误: {e}")
+                return
+        
+        safe_name = "".join(c for c in project_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        if not safe_name:
+            safe_name = "merged_project"
+        project_dir = os.path.join(output_dir, safe_name)
+        original_dir = project_dir
+        counter = 1
+        while os.path.exists(project_dir):
+            project_dir = f"{original_dir}_{counter}"
+            counter += 1
+
+        temp_dirs = []
+        progress = QProgressDialog("正在合并项目...", "取消", 0, len(sources) * 3 + 1, self)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setWindowTitle("合并项目")
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            os.makedirs(project_dir, exist_ok=True)
+            photos_dir = os.path.join(project_dir, 'photos')
+            os.makedirs(photos_dir, exist_ok=True)
+
+            merged_floors = []
+            merged_floor_names = set()
+            total_markers = 0
+            total_photos = 0
+
+            for src_idx, (src_path, is_zip) in enumerate(sources):
+                if progress.wasCanceled():
+                    raise InterruptedError("用户取消合并")
+
+                progress.setLabelText(f"正在处理第 {src_idx + 1}/{len(sources)} 个项目：{os.path.basename(src_path)}")
+                progress.setValue(src_idx * 3 + 1)
+                QApplication.processEvents()
+
+                # 解压 ZIP 到临时目录，或直接使用项目文件夹
+                if is_zip:
+                    temp_dir = os.path.join(tempfile.gettempdir(), f"suixi_merge_{src_idx}_{int(datetime.now().timestamp()*1000)}")
+                    os.makedirs(temp_dir, exist_ok=True)
+                    with zipfile.ZipFile(src_path, 'r') as zf:
+                        zf.extractall(temp_dir)
+                    temp_dirs.append(temp_dir)
+                    project_json_path = None
+                    # 先找根目录下的 project.json
+                    for root, dirs, files in os.walk(temp_dir):
+                        if 'project.json' in files:
+                            project_json_path = os.path.join(root, 'project.json')
+                            break
+                    # 如果没找到，尝试在 viewer 子目录中查找
+                    if not project_json_path:
+                        viewer_dir = os.path.join(temp_dir, 'viewer')
+                        if os.path.exists(viewer_dir):
+                            viewer_json = os.path.join(viewer_dir, 'project.json')
+                            if os.path.exists(viewer_json):
+                                project_json_path = viewer_json
+                    # 如果还是没找到，使用默认数据
+                    if not project_json_path:
+                        src_project_dir = temp_dir
+                        extracted_floors = self._extract_floors_from_viewer(temp_dir)
+                        print(f"[合并调试] ZIP独立数据包 {src_idx+1}: 提取到 {len(extracted_floors)} 个楼层")
+                        if not extracted_floors:
+                            print(f"[合并警告] ZIP独立数据包 {src_idx+1} 中未找到楼层数据")
+                        src_data = {
+                            'projectName': f"独立数据包{src_idx+1}",
+                            'floors': extracted_floors,
+                            'photoBaseDir': ''
+                        }
+                    else:
+                        src_project_dir = os.path.dirname(project_json_path)
+                        with open(project_json_path, 'r', encoding='utf-8') as f:
+                            src_data = json.load(f)
+                else:
+                    # 检查根目录是否有 project.json
+                    project_json_path = os.path.join(src_path, 'project.json')
+                    if os.path.exists(project_json_path):
+                        src_project_dir = src_path
+                        with open(project_json_path, 'r', encoding='utf-8') as f:
+                            src_data = json.load(f)
+                    else:
+                        # 尝试在 viewer 子目录中查找
+                        viewer_dir = os.path.join(src_path, 'viewer')
+                        viewer_json = os.path.join(viewer_dir, 'project.json')
+                        if os.path.exists(viewer_json):
+                            src_project_dir = src_path
+                            with open(viewer_json, 'r', encoding='utf-8') as f:
+                                src_data = json.load(f)
+                        else:
+                            # 没有 project.json，使用默认数据
+                            src_project_dir = src_path
+                            extracted_floors = self._extract_floors_from_viewer(src_path)
+                            print(f"[合并调试] 独立数据包 {src_idx+1}: 提取到 {len(extracted_floors)} 个楼层")
+                            if not extracted_floors:
+                                print(f"[合并警告] 独立数据包 {src_idx+1} 中未找到楼层数据")
+                            src_data = {
+                                'projectName': f"独立数据包{src_idx+1}",
+                                'floors': extracted_floors,
+                                'photoBaseDir': ''
+                            }
+
+                src_name = src_data.get('projectName', f"项目{src_idx+1}")
+                src_floors = src_data.get('floors', [])
+                src_photo_base_dir = src_data.get('photoBaseDir', '')
+
+                # 复制 external_photos/ 到合并项目目录（保留原始文件，供 fallback 路径使用）
+                for ext_src_candidate in [
+                    os.path.join(src_project_dir, 'external_photos'),
+                    os.path.join(src_project_dir, 'viewer', 'external_photos'),
+                ]:
+                    if os.path.isdir(ext_src_candidate):
+                        ext_dst = os.path.join(project_dir, 'external_photos')
+                        os.makedirs(ext_dst, exist_ok=True)
+                        for root, dirs, files in os.walk(ext_src_candidate):
+                            rel_root = os.path.relpath(root, ext_src_candidate)
+                            dst_root = os.path.join(ext_dst, rel_root) if rel_root != '.' else ext_dst
+                            os.makedirs(dst_root, exist_ok=True)
+                            for f in files:
+                                src_file = os.path.join(root, f)
+                                dst_file = os.path.join(dst_root, f)
+                                if os.path.exists(dst_file):
+                                    base, ext = os.path.splitext(f)
+                                    counter = 1
+                                    while os.path.exists(dst_file):
+                                        dst_file = os.path.join(dst_root, f"{base}_{counter}{ext}")
+                                        counter += 1
+                                shutil.copy2(src_file, dst_file)
+                        print(f"[合并] 已复制 external_photos/: {ext_src_candidate} -> {ext_dst}")
+                        break
+
+                for floor in src_floors:
+                    old_floor_id = floor.get('id', f'floor_{src_idx}')
+                    new_floor_id = f"src{src_idx}_{old_floor_id}"
+
+                    # 楼层名：优先保留原名，冲突时才加后缀
+                    floor_name = floor.get('name', '未命名楼层')
+                    new_floor_name = floor_name
+                    if new_floor_name in merged_floor_names:
+                        # 名称冲突，添加数字后缀
+                        base_name = new_floor_name
+                        suffix = 1
+                        while new_floor_name in merged_floor_names:
+                            new_floor_name = f"{base_name}_{suffix}"
+                            suffix += 1
+                    merged_floor_names.add(new_floor_name)
+
+                    # 复制平面图（搜索多个位置）
+                    has_plan = False
+                    search_dirs = [
+                        src_project_dir,
+                        os.path.join(src_project_dir, 'viewer'),
+                    ]
+                    for search_dir in search_dirs:
+                        if has_plan:
+                            break
+                        for ext in ['.jpg', '.jpeg', '.png']:
+                            src_plan = os.path.join(search_dir, f"floorplan_{old_floor_id}{ext}")
+                            if os.path.exists(src_plan):
+                                dst_plan = os.path.join(project_dir, f"floorplan_{new_floor_id}{ext}")
+                                shutil.copy2(src_plan, dst_plan)
+                                print(f"[合并] 已复制平面图: {src_plan} -> {dst_plan}")
+                                has_plan = True
+                                break
+
+                    new_markers = []
+                    for marker in floor.get('markers', []):
+                        old_marker_id = marker.get('id', '')
+                        new_marker_id = f"src{src_idx}_{old_marker_id}"
+
+                        new_photos, new_panorama, new_original = self._merge_copy_marker_photos(
+                            marker, old_marker_id, new_marker_id, src_project_dir, photos_dir, src_photo_base_dir
+                        )
+                        total_photos += len(new_photos)
+
+                        new_marker = {
+                            'id': new_marker_id,
+                            'status': marker.get('status', 'pending'),
+                            'cameraFileName': marker.get('cameraFileName', ''),
+                            'customName': marker.get('customName', ''),
+                            'x': marker.get('x', 0),
+                            'y': marker.get('y', 0),
+                            'timestamp': marker.get('timestamp', ''),
+                            'captureTime': marker.get('captureTime', ''),
+                            'startTime': marker.get('startTime', ''),
+                            'endTime': marker.get('endTime', ''),
+                            'direction': marker.get('direction', 0.0),
+                            'panoramaPath': new_panorama,
+                            'originalPhotoPath': new_original,
+                            'photos': new_photos
+                        }
+                        new_markers.append(new_marker)
+                        total_markers += 1
+
+                    merged_floors.append({
+                        'id': new_floor_id,
+                        'name': new_floor_name,
+                        'order': len(merged_floors),
+                        'hasPlan': has_plan,
+                        'markers': new_markers
+                    })
+                    progress.setValue(src_idx * 3 + 2)
+                    QApplication.processEvents()
+
+            # 写入合并后的 project.json
+            progress.setLabelText("正在写入项目文件...")
+            progress.setValue(len(sources) * 3)
+            QApplication.processEvents()
+
+            merged_data = {
+                'schemaVersion': '4.0',
+                'projectName': project_name,
+                'createdAt': datetime.now().isoformat(),
+                'updatedAt': datetime.now().isoformat(),
+                'timeOffset': 0,
+                'calibrated': False,
+                'photoBaseDir': '',
+                'floors': merged_floors
+            }
+            project_json_path = os.path.join(project_dir, 'project.json')
+            with open(project_json_path, 'w', encoding='utf-8') as f:
+                json.dump(merged_data, f, ensure_ascii=False, indent=2)
+
+            # 加载合并后的项目
+            progress.setLabelText("正在加载合并后的项目...")
+            progress.setValue(len(sources) * 3 + 1)
+            QApplication.processEvents()
+            self.project_dir = project_dir
+            self._load_project(project_json_path)
+            self._add_to_history(self.project_dir, self.project_data.projectName)
+
+            progress.setValue(progress.maximum())
+            progress.close()
+
+            # 自动导出独立查看包（如果勾选）
+            if auto_export:
+                progress.setLabelText("正在自动导出独立查看包...")
+                QApplication.processEvents()
+                try:
+                    self._export_standalone_viewer(output_dir)
+                    QMessageBox.information(
+                        self, "合并成功",
+                        f"已成功合并 {len(sources)} 个项目。\n"
+                        f"新项目位于: {project_dir}\n"
+                        f"楼层数: {len(merged_floors)}\n"
+                        f"总点位: {total_markers}\n"
+                        f"照片数: {total_photos}\n\n"
+                        f"已自动导出独立查看包。"
+                    )
+                except Exception as e:
+                    QMessageBox.warning(
+                        self, "合并成功，但自动导出失败",
+                        f"已成功合并 {len(sources)} 个项目。\n"
+                        f"新项目位于: {project_dir}\n"
+                        f"楼层数: {len(merged_floors)}\n"
+                        f"总点位: {total_markers}\n"
+                        f"照片数: {total_photos}\n\n"
+                        f"自动导出独立查看包时出错: {e}\n"
+                        f"请手动使用【导出独立查看包】功能。"
+                    )
+            else:
+                QMessageBox.information(
+                    self, "合并成功",
+                    f"已成功合并 {len(sources)} 个项目。\n"
+                    f"新项目位于: {project_dir}\n"
+                    f"楼层数: {len(merged_floors)}\n"
+                    f"总点位: {total_markers}\n"
+                    f"照片数: {total_photos}\n\n"
+                    f"现在可以使用【导出采集端数据包】或【导出独立查看包】重新导出。"
+                )
+
+        except InterruptedError:
+            progress.close()
+            if os.path.exists(project_dir):
+                shutil.rmtree(project_dir, ignore_errors=True)
+            QMessageBox.information(self, "已取消", "合并操作已取消，已清理临时文件。")
+        except Exception as e:
+            progress.close()
+            import traceback
+            error_msg = f"错误: {e}\n\n详细信息:\n{traceback.format_exc()}"
+            QMessageBox.critical(self, "合并失败", error_msg)
+            print(f"[错误] 合并失败: {e}")
+            traceback.print_exc()
+        finally:
+            for temp_dir in temp_dirs:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _merge_standalone_viewers(self, sources, output_dir, project_name):
+        """合并多个独立查看包为一个新的独立查看包"""
+        safe_name = "".join(c for c in project_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        if not safe_name:
+            safe_name = "merged_viewer"
+        package_dir = os.path.join(output_dir, f"{safe_name}_查看包")
+        original_dir = package_dir
+        counter = 1
+        while os.path.exists(package_dir):
+            package_dir = f"{original_dir}_{counter}"
+            counter += 1
+
+        viewer_dir = os.path.join(package_dir, 'viewer')
+        os.makedirs(viewer_dir, exist_ok=True)
+        photos_dir = os.path.join(viewer_dir, 'photos')
+        os.makedirs(photos_dir, exist_ok=True)
+
+        progress = QProgressDialog("正在合并独立查看包...", "取消", 0, len(sources) * 3 + 3, self)
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setWindowTitle("合并查看包")
+        progress.setValue(0)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            merged_floors = []
+            merged_floor_names = set()
+            total_markers = 0
+            total_photos = 0
+            first_viewer_dir = None
+
+            for src_idx, (src_path, is_zip) in enumerate(sources):
+                if progress.wasCanceled():
+                    raise InterruptedError("用户取消合并")
+
+                progress.setLabelText(f"正在处理第 {src_idx + 1}/{len(sources)} 个查看包：{os.path.basename(src_path)}")
+                progress.setValue(src_idx * 3 + 1)
+                QApplication.processEvents()
+
+                if is_zip:
+                    temp_dir = os.path.join(tempfile.gettempdir(), f"suixi_merge_viewer_{src_idx}_{int(datetime.now().timestamp()*1000)}")
+                    os.makedirs(temp_dir, exist_ok=True)
+                    with zipfile.ZipFile(src_path, 'r') as zf:
+                        zf.extractall(temp_dir)
+                    src_viewer_dir = os.path.join(temp_dir, 'viewer')
+                    if not os.path.exists(src_viewer_dir):
+                        # 有些查看包可能把 viewer 内容放在根目录
+                        src_viewer_dir = temp_dir
+                else:
+                    src_viewer_dir = os.path.join(src_path, 'viewer')
+                    if not os.path.exists(src_viewer_dir):
+                        src_viewer_dir = src_path
+                if not os.path.exists(src_viewer_dir):
+                    raise ValueError(f"查看包中未找到 viewer 目录: {src_path}")
+                
+                # 复制 external_photos 目录（如果存在）
+                src_external_dir = os.path.join(src_viewer_dir, 'external_photos')
+                if os.path.exists(src_external_dir):
+                    dst_external_dir = os.path.join(viewer_dir, 'external_photos')
+                    os.makedirs(dst_external_dir, exist_ok=True)
+                    for root, dirs, files in os.walk(src_external_dir):
+                        rel_root = os.path.relpath(root, src_external_dir)
+                        dst_root = os.path.join(dst_external_dir, rel_root) if rel_root != '.' else dst_external_dir
+                        os.makedirs(dst_root, exist_ok=True)
+                        for f in files:
+                            shutil.copy2(os.path.join(root, f), os.path.join(dst_root, f))
+                    print(f"[合并查看包] 已复制 external_photos: {src_external_dir} -> {dst_external_dir}")
+
+                if first_viewer_dir is None:
+                    first_viewer_dir = src_viewer_dir
+
+                # 提取 floors 数据
+                floors = self._extract_floors_from_viewer(src_viewer_dir)
+                src_name = f"项目{src_idx+1}"
+
+                for floor in floors:
+                    old_floor_id = floor.get('id', f'floor_{src_idx}')
+                    new_floor_id = f"src{src_idx}_{old_floor_id}"
+
+                    floor_name = floor.get('name', '未命名楼层')
+                    new_floor_name = floor_name
+                    if new_floor_name in merged_floor_names:
+                        # 名称冲突，添加数字后缀
+                        base_name = new_floor_name
+                        suffix = 1
+                        while new_floor_name in merged_floor_names:
+                            new_floor_name = f"{base_name}_{suffix}"
+                            suffix += 1
+                    merged_floor_names.add(new_floor_name)
+
+                    # 复制平面图
+                    has_plan = False
+                    for ext in ['.jpg', '.jpeg', '.png']:
+                        src_plan = os.path.join(src_viewer_dir, f"floorplan_{old_floor_id}{ext}")
+                        if os.path.exists(src_plan):
+                            dst_plan = os.path.join(viewer_dir, f"floorplan_{new_floor_id}{ext}")
+                            shutil.copy2(src_plan, dst_plan)
+                            print(f"[合并查看包] 已复制平面图: {src_plan}")
+                            has_plan = True
+                            break
+
+                    new_markers = []
+                    for marker in floor.get('markers', []):
+                        old_marker_id = marker.get('id', '')
+                        new_marker_id = f"src{src_idx}_{old_marker_id}"
+
+                        print(f"[合并查看包] 处理点位 {old_marker_id}: panoramaPath={marker.get('panoramaPath', '')}, photos={marker.get('photos', [])}")
+
+                        new_photos, new_panorama, _ = self._merge_copy_marker_photos(
+                            marker, old_marker_id, new_marker_id, src_viewer_dir,
+                            os.path.join(viewer_dir, 'photos'), ''
+                        )
+                        total_photos += len(new_photos)
+                        
+                        print(f"[合并查看包] 复制结果: new_photos={new_photos}, new_panorama={new_panorama}")
+                        
+                        # 如果照片复制失败，但 external_photos 已经复制，保留原始路径
+                        if not new_photos and (marker.get('panoramaPath') or marker.get('photos')):
+                            # 检查 external_photos 是否已复制
+                            pano_path = marker.get('panoramaPath', '')
+                            photos_list = marker.get('photos', [])
+                            all_paths = [p for p in [pano_path] + photos_list if p]
+                            
+                            # 检查文件是否在 external_photos 中存在
+                            for path in all_paths:
+                                filename = os.path.basename(path.replace('/', os.sep))
+                                check_path = os.path.join(viewer_dir, 'external_photos', filename)
+                                if os.path.exists(check_path):
+                                    print(f"[合并查看包] 照片已存在于 external_photos: {filename}")
+                                    # 保留原始路径
+                                    new_photos = photos_list
+                                    new_panorama = pano_path
+                                    break
+                            else:
+                                # 文件不存在 - 不保留原始路径（否则会导致 404）
+                                # 尝试在 source viewer 的 photos/ 下按 cameraFileName 或 marker ID 查找
+                                found_alt = False
+                                for ext_dir_candidate in [
+                                    os.path.join(src_viewer_dir, 'photos'),
+                                    os.path.join(src_viewer_dir, 'external_photos'),
+                                ]:
+                                    if not os.path.isdir(ext_dir_candidate):
+                                        continue
+                                    search_name = marker.get('cameraFileName', '')
+                                    for f in os.listdir(ext_dir_candidate):
+                                        if not f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                                            continue
+                                        if (search_name and f.lower() == search_name.lower()) or \
+                                           f.lower().startswith(old_marker_id.lower()):
+                                            alt_src = os.path.join(ext_dir_candidate, f)
+                                            if os.path.isfile(alt_src):
+                                                ext = os.path.splitext(alt_src)[1] or '.jpg'
+                                                dst_name = f"{new_marker_id}{ext}"
+                                                dst_path = os.path.join(photos_dir, dst_name)
+                                                shutil.copy2(alt_src, dst_path)
+                                                rel = f"photos/{dst_name}"
+                                                print(f"[合并查看包] 备用搜索找到照片: {alt_src} -> {rel}")
+                                                new_panorama = rel
+                                                new_photos = [rel]
+                                                found_alt = True
+                                                break
+                                    if found_alt:
+                                        break
+                                if not found_alt:
+                                    print(f"[合并查看包] 警告: 彻底找不到照片 {old_marker_id}，标记点无照片")
+                                    new_photos = []
+                                    new_panorama = ""
+                            
+                            # 确保路径使用正斜杠，并过滤空路径
+                            new_photos = [p.replace('\\', '/') for p in new_photos if p]
+                            new_panorama = new_panorama.replace('\\', '/') if new_panorama else ''
+
+                        new_marker = {
+                            'id': new_marker_id,
+                            'status': marker.get('status', 'linked'),
+                            'cameraFileName': marker.get('cameraFileName', ''),
+                            'customName': marker.get('customName', ''),
+                            'x': marker.get('x', 0),
+                            'y': marker.get('y', 0),
+                            'timestamp': marker.get('timestamp', ''),
+                            'captureTime': marker.get('captureTime', ''),
+                            'startTime': marker.get('startTime', ''),
+                            'endTime': marker.get('endTime', ''),
+                            'direction': marker.get('direction', 0.0),
+                            'panoramaPath': new_panorama,
+                            'photos': new_photos
+                        }
+                        new_markers.append(new_marker)
+                        total_markers += 1
+
+                    merged_floors.append({
+                        'id': new_floor_id,
+                        'name': new_floor_name,
+                        'order': len(merged_floors),
+                        'hasPlan': has_plan,
+                        'markers': new_markers
+                    })
+                    progress.setValue(src_idx * 3 + 2)
+                    QApplication.processEvents()
+
+            # 复制离线资源（从第一个查看包）
+            progress.setLabelText("正在复制离线资源...")
+            progress.setValue(len(sources) * 3)
+            QApplication.processEvents()
+
+            if first_viewer_dir:
+                for fname in ['pannellum.css', 'pannellum.js', 'spritesheet.png']:
+                    src = os.path.join(first_viewer_dir, fname)
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(viewer_dir, fname))
+
+            # 构造临时项目对象并生成 HTML
+            progress.setLabelText("正在生成新查看包...")
+            progress.setValue(len(sources) * 3 + 1)
+            QApplication.processEvents()
+
+            temp_project = Project(
+                schemaVersion='4.0',
+                projectName=project_name,
+                createdAt=datetime.now().isoformat(),
+                updatedAt=datetime.now().isoformat(),
+                floors=merged_floors,
+                timeOffset=0,
+                calibrated=False,
+                photoBaseDir=''
+            )
+            old_project_data = self.project_data
+            old_project_dir = self.project_dir
+            self.project_data = temp_project
+            self.project_dir = package_dir
+
+            try:
+                self._generate_viewer_html(viewer_dir)
+                # 替换 CDN 引用为本地路径（如果离线资源存在）
+                index_html = os.path.join(viewer_dir, 'index.html')
+                if os.path.exists(index_html):
+                    with open(index_html, 'r', encoding='utf-8') as f:
+                        html_content = f.read()
+                    html_content = html_content.replace(
+                        'href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css"',
+                        'href="./pannellum.css"'
+                    )
+                    html_content = html_content.replace(
+                        'src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"',
+                        'src="./pannellum.js"'
+                    )
+                    with open(index_html, 'w', encoding='utf-8') as f:
+                        f.write(html_content)
+
+                # 写入 project.json 到 viewer 中（路径转换为正斜杠）
+                project_dict = temp_project.to_dict()
+                for floor in project_dict.get('floors', []):
+                    for marker in floor.get('markers', []):
+                        for key in ['panoramaPath', 'originalPhotoPath']:
+                            if marker.get(key):
+                                marker[key] = marker[key].replace('\\', '/')
+                        if marker.get('photos'):
+                            marker['photos'] = [p.replace('\\', '/') for p in marker['photos']]
+                with open(os.path.join(viewer_dir, 'project.json'), 'w', encoding='utf-8') as f:
+                    json.dump(project_dict, f, ensure_ascii=False, indent=2)
+                print(f"[合并查看包] 已写入 project.json: {os.path.join(viewer_dir, 'project.json')}")
+            finally:
+                self.project_data = old_project_data
+                self.project_dir = old_project_dir
+
+            # 复制启动器文件（从第一个查看包或重新生成）
+            progress.setLabelText("正在复制启动器...")
+            progress.setValue(len(sources) * 3 + 2)
+            QApplication.processEvents()
+
+            launcher_copied = False
+            if first_viewer_dir:
+                parent_dir = os.path.dirname(first_viewer_dir)
+                for fname in ['launcher.py', 'build_launcher.bat', '双击查看.exe']:
+                    src = os.path.join(parent_dir, fname)
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(package_dir, fname))
+                        if fname == '双击查看.exe':
+                            launcher_copied = True
+
+            if not launcher_copied:
+                # 重新生成 launcher.py 和 build_launcher.bat
+                launcher_py = os.path.join(package_dir, 'launcher.py')
+                with open(launcher_py, 'w', encoding='utf-8') as f:
+                    f.write(LAUNCHER_PY_CODE)
+                build_bat = os.path.join(package_dir, 'build_launcher.bat')
+                with open(build_bat, 'w', encoding='utf-8') as f:
+                    f.write(BUILD_LAUNCHER_BAT_CODE)
+
+            progress.setValue(progress.maximum())
+            progress.close()
+
+            QMessageBox.information(
+                self, "合并成功",
+                f"已成功合并 {len(sources)} 个独立查看包。\n"
+                f"新查看包位于: {package_dir}\n"
+                f"楼层数: {len(merged_floors)}\n"
+                f"总点位: {total_markers}\n"
+                f"照片数: {total_photos}\n\n"
+                f"可直接运行 {os.path.join(package_dir, '双击查看.exe')} 或 launcher.py 查看。"
+            )
+
+        except InterruptedError:
+            progress.close()
+            if os.path.exists(package_dir):
+                shutil.rmtree(package_dir, ignore_errors=True)
+            QMessageBox.information(self, "已取消", "合并操作已取消，已清理临时文件。")
+        except Exception as e:
+            progress.close()
+            QMessageBox.critical(self, "合并失败", f"错误: {e}")
             import traceback
             traceback.print_exc()
+
+    def _extract_floors_from_viewer(self, viewer_dir: str) -> List[dict]:
+        """从独立查看包中提取 floors 数据：优先 project.json，否则解析 index.html"""
+        # 检查当前目录
+        project_json_path = os.path.join(viewer_dir, 'project.json')
+        if os.path.exists(project_json_path):
+            try:
+                with open(project_json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                floors = data.get('floors', [])
+                if floors:
+                    print(f"[调试] 从 {viewer_dir}/project.json 读取到 {len(floors)} 个楼层")
+                    return floors
+            except Exception as e:
+                print(f"[警告] 读取 {viewer_dir}/project.json 失败: {e}")
+
+        # 检查 viewer 子目录
+        viewer_subdir = os.path.join(viewer_dir, 'viewer')
+        if os.path.exists(viewer_subdir):
+            viewer_json = os.path.join(viewer_subdir, 'project.json')
+            if os.path.exists(viewer_json):
+                try:
+                    with open(viewer_json, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    floors = data.get('floors', [])
+                    if floors:
+                        print(f"[调试] 从 {viewer_subdir}/project.json 读取到 {len(floors)} 个楼层")
+                        return floors
+                except Exception as e:
+                    print(f"[警告] 读取 {viewer_subdir}/project.json 失败: {e}")
+
+        # 从 index.html 中解析 floors 数据（当前目录）
+        index_html = os.path.join(viewer_dir, 'index.html')
+        if os.path.exists(index_html):
+            try:
+                with open(index_html, 'r', encoding='utf-8') as f:
+                    html = f.read()
+                match = re.search(r'const\s+floors\s*=\s*(\[.*?\]);\s*', html, re.DOTALL)
+                if match:
+                    floors = json.loads(match.group(1))
+                    print(f"[调试] 从 {viewer_dir}/index.html 解析到 {len(floors)} 个楼层")
+                    return floors
+            except Exception as e:
+                print(f"[警告] 解析 {viewer_dir}/index.html 失败: {e}")
+
+        # 从 viewer 子目录的 index.html 中解析
+        viewer_index = os.path.join(viewer_subdir, 'index.html') if os.path.exists(viewer_subdir) else None
+        if viewer_index and os.path.exists(viewer_index):
+            try:
+                with open(viewer_index, 'r', encoding='utf-8') as f:
+                    html = f.read()
+                match = re.search(r'const\s+floors\s*=\s*(\[.*?\]);\s*', html, re.DOTALL)
+                if match:
+                    floors = json.loads(match.group(1))
+                    print(f"[调试] 从 {viewer_index} 解析到 {len(floors)} 个楼层")
+                    return floors
+            except Exception as e:
+                print(f"[警告] 解析 {viewer_index} 失败: {e}")
+
+        print(f"[警告] 在 {viewer_dir} 中未找到任何楼层数据")
+        return []
+
+
+    def _merge_copy_marker_photos(self, marker, old_marker_id, new_marker_id, src_project_dir, photos_dir, src_photo_base_dir=""):
+        """复制点位照片到合并项目，返回 (photos, panoramaPath, originalPhotoPath)"""
+        new_photos = []
+        new_panorama = ""
+        new_original = ""
+
+        # 确保目标照片目录存在
+        os.makedirs(photos_dir, exist_ok=True)
+
+        panorama_path = marker.get('panoramaPath', '') or ''
+        photos_list = marker.get('photos', []) or []
+        print(f"[照片复制] 点位 {old_marker_id}: panoramaPath='{panorama_path}', photos={photos_list}")
+
+        def try_copy(src_photo, marker_id_suffix, index=0):
+            if not src_photo or not os.path.exists(src_photo):
+                return None
+            ext = os.path.splitext(src_photo)[1]
+            if not ext:
+                ext = '.jpg'
+            if index == 0:
+                dst_photo = os.path.join(photos_dir, f"{new_marker_id}{ext}")
+                rel = f"photos/{new_marker_id}{ext}"
+            else:
+                dst_photo = os.path.join(photos_dir, f"{new_marker_id}_{index}{ext}")
+                rel = f"photos/{new_marker_id}_{index}{ext}"
+            try:
+                # 处理文件名冲突：目标已存在时自动重命名
+                if os.path.exists(dst_photo):
+                    base = f"{new_marker_id}_{index}" if index > 0 else new_marker_id
+                    counter = 1
+                    while os.path.exists(dst_photo):
+                        dst_photo = os.path.join(photos_dir, f"{base}_{counter}{ext}")
+                        rel = f"photos/{base}_{counter}{ext}"
+                        counter += 1
+                shutil.copy2(src_photo, dst_photo)
+                print(f"[照片复制] 成功: {src_photo} -> {dst_photo}")
+                return rel
+            except Exception as e:
+                print(f"[照片复制] 失败: {src_photo} -> {dst_photo}, 错误: {e}")
+                return None
+
+        def resolve_photo_path(photo_path):
+            """将 marker 中的相对路径解析为实际文件路径（支持独立查看包结构）"""
+            if not photo_path:
+                return None
+
+            # 绝对路径直接判断
+            if os.path.isabs(photo_path):
+                return photo_path if os.path.exists(photo_path) else None
+
+            photo_path = photo_path.replace('\\', '/')
+            candidates = []
+            parent_dir = os.path.dirname(src_project_dir)  # 独立查看包根目录
+
+            # 1. 直接拼接（适用于 viewer/ 下的相对路径）
+            candidates.append(os.path.join(src_project_dir, photo_path))
+            if parent_dir:
+                candidates.append(os.path.join(parent_dir, photo_path))
+
+            # 2. 处理 external_photos/ 前缀
+            if photo_path.startswith('external_photos/'):
+                sub = photo_path[len('external_photos/'):]
+                candidates.append(os.path.join(src_project_dir, 'external_photos', sub))
+                # 也尝试在 viewer/external_photos/ 下查找
+                candidates.append(os.path.join(src_project_dir, 'viewer', 'external_photos', sub))
+                if parent_dir:
+                    candidates.append(os.path.join(parent_dir, 'external_photos', sub))
+
+            # 3. 处理 photos/ 前缀
+            if photo_path.startswith('photos/'):
+                sub = photo_path[len('photos/'):]
+                candidates.append(os.path.join(src_project_dir, 'photos', sub))
+                candidates.append(os.path.join(src_project_dir, 'viewer', 'photos', sub))
+                if parent_dir:
+                    candidates.append(os.path.join(parent_dir, 'photos', sub))
+
+            # 4. 纯文件名：在常见目录及一级子目录中搜索
+            if '/' not in photo_path:
+                for base in [src_project_dir, parent_dir]:
+                    if not base:
+                        continue
+                    for subdir in ['external_photos', 'photos', '']:
+                        search_dir = os.path.join(base, subdir)
+                        if not os.path.isdir(search_dir):
+                            continue
+                        for f in os.listdir(search_dir):
+                            if f.lower() == photo_path.lower():
+                                candidates.append(os.path.join(search_dir, f))
+                            sub = os.path.join(search_dir, f)
+                            if os.path.isdir(sub):
+                                for sf in os.listdir(sub):
+                                    if sf.lower() == photo_path.lower():
+                                        candidates.append(os.path.join(sub, sf))
+
+            # 5. 外部照片基目录
+            if src_photo_base_dir:
+                sub = photo_path
+                if sub.startswith('external_photos/'):
+                    sub = sub[len('external_photos/'):]
+                candidates.append(os.path.join(src_photo_base_dir, sub))
+
+            # 6. 兜底：按 basename 在 src_project_dir 的常见子目录中直接搜索
+            basename = os.path.basename(photo_path)
+            for base in [src_project_dir, parent_dir]:
+                if not base:
+                    continue
+                for subdir in ['external_photos', 'photos', 'viewer/external_photos', 'viewer/photos']:
+                    fp = os.path.join(base, subdir.replace('/', os.sep), basename)
+                    candidates.append(fp)
+
+            # 去重并返回第一个存在的文件
+            seen = set()
+            for cp in candidates:
+                if not cp:
+                    continue
+                cp = os.path.normpath(cp)
+                if cp in seen:
+                    continue
+                seen.add(cp)
+                if os.path.exists(cp) and os.path.isfile(cp):
+                    return cp
+            return None
+
+        # 复制 panoramaPath
+        if panorama_path:
+            src = resolve_photo_path(panorama_path)
+            if src:
+                rel = try_copy(src, new_marker_id, 0)
+                if rel:
+                    new_panorama = rel
+                    new_photos.append(rel)
+            else:
+                print(f"[照片复制] 无法解析 panoramaPath: {panorama_path}")
+
+        # 复制 photos 列表（去重）
+        seen_paths = {panorama_path}
+        for idx, photo_path in enumerate(photos_list):
+            if not photo_path or photo_path in seen_paths:
+                continue
+            seen_paths.add(photo_path)
+            src = resolve_photo_path(photo_path)
+            if src:
+                rel = try_copy(src, new_marker_id, idx + 1)
+                if rel:
+                    new_photos.append(rel)
+            else:
+                print(f"[照片复制] 无法解析 photo: {photo_path}")
+
+        # 兜底：如果复制全部失败，但 external_photos 已整体复制，保留原始相对路径
+        if not new_photos and panorama_path:
+            # 支持子目录路径检查（相对于项目目录）
+            check_path = os.path.join(os.path.dirname(photos_dir), panorama_path.replace('/', os.sep))
+            if os.path.exists(check_path):
+                new_panorama = panorama_path.replace('\\', '/')
+                new_photos = [p.replace('\\', '/') for p in photos_list if p] if photos_list else [new_panorama]
+                print(f"[照片复制] 兜底保留原始路径: {new_panorama}")
+            else:
+                # 在 external_photos 中递归搜索文件名
+                filename = os.path.basename(panorama_path.replace('/', os.sep))
+                found = False
+                ext_dir = os.path.join(os.path.dirname(photos_dir), 'external_photos')
+                if os.path.isdir(ext_dir):
+                    for dp, dn, filenames in os.walk(ext_dir):
+                        for fn in filenames:
+                            if fn.lower() == filename.lower():
+                                # 计算相对于 viewer_dir 的路径
+                                rel_to_viewer = os.path.relpath(os.path.join(dp, fn), os.path.dirname(photos_dir)).replace('\\', '/')
+                                new_panorama = rel_to_viewer
+                                new_photos = [rel_to_viewer]
+                                found = True
+                                print(f"[照片复制] 兜底搜索到文件: {rel_to_viewer}")
+                                break
+                        if found:
+                            break
+                if not found:
+                    print(f"[照片复制] 警告: 彻底找不到照片: {panorama_path}")
+
+        # 最终去重
+        seen = set()
+        unique_photos = []
+        for p in new_photos:
+            if p and p not in seen:
+                seen.add(p)
+                unique_photos.append(p)
+        new_photos = unique_photos
+
+        return new_photos, new_panorama, new_original
 
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.7</h2>
+            """<h2>随系 · 影像管理器 V1.9.2</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>""")
@@ -9468,9 +10749,8 @@ class ShortcutDialog(QDialog):
                 idx = actions.index(action)
                 self.table.item(idx, 1).setText(key)
 
-def main():
-    import datetime
-    
+
+if __name__ == '__main__':
     # =============================================================================
     # 随系 · 影像管理器
     # 系统追求：让工具追上现场的速度
@@ -9494,7 +10774,7 @@ def main():
                 self.terminal = sys.stdout
                 self.log = open(filepath, 'a', encoding='utf-8')
                 self.log.write(f"\n\n{'='*50}\n")
-                self.log.write(f"程序启动: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                self.log.write(f"程序启动: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 self.log.write(f"{'='*50}\n")
             
             def write(self, message):
@@ -9537,5 +10817,3 @@ def main():
     sys.exit(app.exec())
 
 
-if __name__ == '__main__':
-    main()

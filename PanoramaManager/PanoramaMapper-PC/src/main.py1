@@ -6305,8 +6305,8 @@ class PanoramaManager(QMainWindow):
             // 1. 获取当前全景视角
             const currentYaw = viewer.getYaw();
             
-            // 2. 计算新方向：当前视角的世界方向（基准 + 偏移）作为新的 direction
-            const newDirection = normalizeAngle((window._sectorBase || 0) + currentYaw);
+            // 2. 计算新方向：当前全景的 yaw 就是新的 direction（direction=0 表示正北）
+            const newDirection = normalizeAngle(currentYaw);
             
             // 3. 计算变化量（用于日志）
             const delta = normalizeAngle(newDirection - compassAlignState.lockedDirection);
@@ -6315,7 +6315,6 @@ class PanoramaManager(QMainWindow):
             marker.direction = newDirection;
             window._sectorBase = newDirection;       // 更新基准方向，后续 sendDirectionUpdate 使用新基准
             currentSectorDirection = newDirection;   // 同步扇形指向，避免从 lockedDirection 跳变
-            window._lastYaw = currentYaw;            // 重置增量基准，避免 sendDirectionUpdate 跳变
             
             // 5. 直接持久化到 project.json（原子写入 + 备份）
             saveDirectionToFile(marker.id, newDirection)
@@ -7226,7 +7225,6 @@ function zoomIn() {
             window._sectorBase = (marker.direction !== null && marker.direction !== undefined && marker.direction !== '') 
                 ? parseFloat(marker.direction) : 0;
             currentSectorDirection = window._sectorBase;
-            window._lastYaw = 0;
             
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
@@ -7240,10 +7238,11 @@ function zoomIn() {
             // 跟随全景旋转：扇形 = _sectorBase + 当前 yaw（全景从 yaw=0 开始）
             const sendDirectionUpdate = (yaw) => {
                 if (compassAlignState.isAligning) return;
-                let delta = normalizeAngle(yaw - (window._lastYaw || 0));
-                window._lastYaw = yaw;
+                let delta = normalizeAngle(yaw);
                 if (Math.abs(delta) < 1) return;
-                currentSectorDirection = normalizeAngle(currentSectorDirection + delta);
+                let newDirection = window._sectorBase + delta;
+                newDirection = ((newDirection + 180) % 360 + 360) % 360 - 180;
+                currentSectorDirection = newDirection;
                 const wrapper = document.getElementById('floorplanWrapper');
                 if (wrapper) {
                     const floor = floors[currentFloorIndex];
@@ -10427,7 +10426,7 @@ function jumpToMarker(targetId) {
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.9.3</h2>
+            """<h2>随系 · 影像管理器 V1.9.2</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>""")

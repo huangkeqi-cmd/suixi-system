@@ -6260,6 +6260,14 @@ class PanoramaManager(QMainWindow):
         }
 
         function enterAlignMode(marker, compass, label, hintBar) {
+            const floor = floors[currentFloorIndex];
+            const yawAtEnter = viewer ? viewer.getYaw() : 'no viewer';
+            console.log('[对齐调试] 进入对齐: sectorBase=', window._sectorBase, 
+                        'currentSectorDirection=', currentSectorDirection,
+                        'marker.direction=', marker.direction,
+                        'yaw=', yawAtEnter,
+                        'lastYaw=', window._lastYaw);
+            
             // 1. 记录当前状态：使用扇形实际指向位置（currentSectorDirection），而非 marker.direction
             const lockedDir = (currentSectorDirection !== null && currentSectorDirection !== undefined) 
                 ? currentSectorDirection 
@@ -6270,7 +6278,8 @@ class PanoramaManager(QMainWindow):
                 isAligning: true,
                 lockedDirection: lockedDir,
                 lockedHeading: lockedHeading,
-                markerId: marker.id
+                markerId: marker.id,
+                yawAtEnter: viewer ? viewer.getYaw() : 0
             };
             
             // 2. UI 反馈
@@ -6300,21 +6309,32 @@ class PanoramaManager(QMainWindow):
         }
 
         function confirmAlign(marker, compass, label, hintBar) {
+            const floor = floors[currentFloorIndex];
             if (!viewer) return;
             
             // 1. 获取当前全景视角
             const currentYaw = viewer.getYaw();
             
-            // 2. 计算新方向：当前视角的世界方向（基准 + 偏移）作为新的 direction
-            const newDirection = normalizeAngle((window._sectorBase || 0) + currentYaw);
+            console.log('[对齐调试] lockedDirection:', compassAlignState.lockedDirection, 
+                        'currentYaw:', currentYaw, 
+                        'marker.direction:', marker.direction);
             
-            // 3. 计算变化量（用于日志）
-            const delta = normalizeAngle(newDirection - compassAlignState.lockedDirection);
+            // 2. 计算新方向：扇形冻结在 lockedDirection，全景从进入对齐后转动了 (currentYaw - yawAtEnter)
+            //    新基准 = 冻结角度 - 全景转动变化量（取反修正）
+            const newDirection = normalizeAngle(compassAlignState.lockedDirection - (currentYaw - compassAlignState.yawAtEnter));
+            
+            // 3. 计算变化量（仅用于日志）
+            const delta = normalizeAngle(newDirection - (parseFloat(marker.direction) || 0));
+            
+            console.log('[对齐调试] 公式: lockedDirection + currentYaw =', 
+                        compassAlignState.lockedDirection, '+', currentYaw, '=', 
+                        compassAlignState.lockedDirection + currentYaw,
+                        '→ newDirection:', newDirection, 'delta:', delta);
             
             // 4. 更新本地数据
             marker.direction = newDirection;
             window._sectorBase = newDirection;       // 更新基准方向，后续 sendDirectionUpdate 使用新基准
-            currentSectorDirection = newDirection;   // 同步扇形指向，避免从 lockedDirection 跳变
+            currentSectorDirection = newDirection;  // 扇形指向新保存的方向
             window._lastYaw = currentYaw;            // 重置增量基准，避免 sendDirectionUpdate 跳变
             
             // 5. 直接持久化到 project.json（原子写入 + 备份）
@@ -6340,7 +6360,7 @@ class PanoramaManager(QMainWindow):
             }
             startDirectionSync(marker);
             
-            // 7. 更新扇形渲染（使用 currentSectorDirection = newDirection）
+            // 7. 更新扇形渲染（currentSectorDirection 保持为 lockedDirection，扇形不动）
             const wrapper = document.getElementById('floorplanWrapper');
             if (wrapper) {
                 const overlay = document.getElementById('floorplanOverlay');
@@ -10427,7 +10447,7 @@ function jumpToMarker(targetId) {
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.9.3</h2>
+            """<h2>随系 · 影像管理器 V1.9.4</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>""")

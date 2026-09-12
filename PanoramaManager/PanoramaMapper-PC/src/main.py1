@@ -6,6 +6,7 @@ Copyright (c) 2026 huangkeqi
 保留所有权利。
 
 本软件目前为个人工作流工具，开源供学习参考。
+项目主页：https://github.com/huangkeqi-cmd/suixi-system
 """
 
 # 影像管理器主入口
@@ -1641,13 +1642,6 @@ class FloorplanCanvas(QGraphicsView):
             text = QGraphicsTextItem(str(label))
             text.setPos(pixel_x + radius + 2, pixel_y - radius)
             text.setDefaultTextColor(QColor(255, 255, 255))
-            # 给文字加黑色描边，增强任意背景下的可读性
-            from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(2)
-            shadow.setColor(QColor(0, 0, 0))
-            shadow.setOffset(1, 1)
-            text.setGraphicsEffect(shadow)
             text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)  # 文本不拦截鼠标
             self.scene.addItem(text)
             self.text_items.append(text)
@@ -2020,12 +2014,11 @@ class FloatingToolbar(QFrame):
     """可拖动的悬浮快捷操作按钮栏 - 支持横向/竖向排列和按钮可见性控制"""
 
     BUTTON_CONFIG = {
-        'photo_relation': {'text': '调整关联', 'tooltip': '调整已关联照片对应关系（单点互换/批量重排/跨楼层）'},
         'relink': {'text': '重新关联', 'tooltip': '重新关联单点照片'},
         'delete': {'text': '删除当前', 'tooltip': '删除当前点位'},
         'sector': {'text': '显/隐扇形', 'tooltip': '显示/隐藏全部扇形视线'},
         'adjust': {'text': '调点方向', 'tooltip': '调整单点扇形视线方向'},
-        'set_all': {'text': '调全方向', 'tooltip': '调整所有点扇形视线方向'},        
+        'set_all': {'text': '调全方向', 'tooltip': '调整所有点扇形视线方向'},
     }
 
     # 信号：按钮点击的转发，避免按钮被重建时丢失连接
@@ -2034,7 +2027,6 @@ class FloatingToolbar(QFrame):
     sector_clicked = pyqtSignal()
     adjust_clicked = pyqtSignal()
     set_all_clicked = pyqtSignal()
-    photo_relation_clicked = pyqtSignal()
     marker_size_changed = pyqtSignal(int)  # 标记点尺寸变化信号
 
     def __init__(self, parent=None, settings=None):
@@ -2074,14 +2066,17 @@ class FloatingToolbar(QFrame):
         self._rebuild_layout()
         self._apply_style()
         self.setVisible(settings.get('visible', True))
+        # 切换方向后，确保位置合理
         parent = self.parent()
         if parent:
             if self._settings.get('orientation', 'vertical') == 'horizontal':
+                # 横向：底部居中
                 x = 10
                 y = 130
                 self.move(x, y)
             else:
-                x = max(10, parent.width() - 110 - 10)   # ← 改：90→110
+                # 竖向：右侧
+                x = max(10, parent.width() - 90 - 10)
                 self.move(x, self.y())
 
     def _init_ui(self):
@@ -2090,6 +2085,7 @@ class FloatingToolbar(QFrame):
     def _rebuild_layout(self):
         old_layout = self.layout()
         if old_layout:
+            # 安全清理：先收集所有widget，移除后再deleteLater
             widgets_to_delete = []
             while old_layout.count():
                 item = old_layout.takeAt(0)
@@ -2098,6 +2094,7 @@ class FloatingToolbar(QFrame):
                     widgets_to_delete.append(w)
                     w.setParent(None)
             old_layout.deleteLater()
+            # 延迟删除widget，避免半销毁状态导致setStyleSheet崩溃
             for w in widgets_to_delete:
                 w.deleteLater()
 
@@ -2108,20 +2105,22 @@ class FloatingToolbar(QFrame):
 
         if is_vertical:
             layout = QVBoxLayout(self)
+            # 竖向：右侧，使用当前y坐标或默认值
             if parent:
-                x = max(10, parent.width() - 110 - 10)   # ← 110（改自90）
+                x = max(10, parent.width() - 90 - 10)
                 y = self.y() if self.y() > 0 else 70
-                self.setGeometry(x, y, 110, 300)         # ← 宽110，高300（改自90×230）
+                self.setGeometry(x, y, 90, 230)
             else:
-                self.setGeometry(self.x(), self.y(), 110, 300)
+                self.setGeometry(self.x(), self.y(), 90, 230)
         else:
             layout = QHBoxLayout(self)
+            # 横向：底部居中
             if parent:
                 x = 10
                 y = 130
-                self.setGeometry(x, y, 540, 55)          # ← 宽540，高55（改自380×50）
+                self.setGeometry(x, y, 380, 50)
             else:
-                self.setGeometry(self.x(), self.y(), 540, 55)
+                self.setGeometry(self.x(), self.y(), 380, 50)
 
         layout.setSpacing(6)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -2136,6 +2135,7 @@ class FloatingToolbar(QFrame):
             if visibility.get(key, True):
                 btn = QPushButton(config['text'])
                 btn.setToolTip(config['tooltip'])
+                # 统一连接到内部转发器，避免外部直接连接到具体按钮实例
                 btn.clicked.connect(lambda checked=False, k=key: self._on_button_clicked(k))
                 layout.addWidget(btn)
                 self.buttons[key] = btn
@@ -2143,6 +2143,7 @@ class FloatingToolbar(QFrame):
         if is_vertical:
             layout.addStretch()
 
+            # 标记点大小滑块
             size_label = QLabel(" 标记点直径")
             size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(size_label)
@@ -2154,6 +2155,7 @@ class FloatingToolbar(QFrame):
             size_slider.valueChanged.connect(self._on_marker_size_changed)
             layout.addWidget(size_slider)
 
+        # 恢复按钮的启用状态：如果父窗口实现了 _update_floating_toolbar，让父窗口来设置状态
         parent = self.parent()
         if parent and hasattr(parent, '_update_floating_toolbar'):
             try:
@@ -2161,6 +2163,7 @@ class FloatingToolbar(QFrame):
             except Exception:
                 pass
         else:
+            # 默认启用（除非父窗口在后续更新中覆盖）
             for k, b in self.buttons.items():
                 b.setEnabled(True)
 
@@ -2176,8 +2179,6 @@ class FloatingToolbar(QFrame):
             self.adjust_clicked.emit()
         elif key == 'set_all':
             self.set_all_clicked.emit()
-        elif key == 'photo_relation': 
-            self.photo_relation_clicked.emit()
 
     def _on_marker_size_changed(self, value: int):
         """标记点大小改变"""
@@ -2947,596 +2948,6 @@ class MergeProjectsDialog(QDialog):
         return self.auto_export_cb.isChecked()
 
 
-# =============================================================================
-# 照片关联关系管理对话框
-# =============================================================================
-
-class PhotoReorderDialog(QDialog):
-    """自定义照片顺序对话框 - 拖拽排序照片后分配给固定采集点"""
-
-    def __init__(self, markers_data: List[dict], parent=None):
-        """
-        markers_data: 每个元素为 dict，包含:
-            - marker_id, marker_name, floor_name
-            - photo_filename, panoramaPath, originalPhotoPath, photos, cameraFileName
-        """
-        super().__init__(parent)
-        self.setWindowTitle("自定义照片重排")
-        self.resize(700, 500)
-        self._markers_data = markers_data  # 原始采集点数据（固定顺序）
-        self._photos_data = []  # 照片数据（可排序）
-        self._init_ui()
-        self._extract_photos()
-
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
-
-        hint = QLabel("💡 左侧为固定采集点顺序，右侧照片可拖拽调整顺序，确认后按新顺序分配")
-        hint.setStyleSheet("color: #8E8E93; font-size: 12px;")
-        layout.addWidget(hint)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(splitter, 1)
-
-        # 左侧：采集点列表（固定）
-        left_group = QGroupBox("采集点（固定顺序）")
-        left_layout = QVBoxLayout(left_group)
-        self.marker_list = QListWidget()
-        self.marker_list.setDragEnabled(False)
-        self.marker_list.setAcceptDrops(False)
-        self.marker_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #D1D1D6;
-                border-radius: 6px;
-                background-color: #f9f9f9;
-            }
-            QListWidget::item {
-                padding: 10px;
-                border-bottom: 1px solid #eee;
-            }
-            QListWidget::item:selected {
-                background-color: #007AFF;
-                color: white;
-            }
-        """)
-        left_layout.addWidget(self.marker_list)
-        splitter.addWidget(left_group)
-
-        # 右侧：照片列表（可拖拽排序）
-        right_group = QGroupBox("照片（拖拽调整顺序）")
-        right_layout = QVBoxLayout(right_group)
-        self.photo_list = QListWidget()
-        self.photo_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
-        self.photo_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #D1D1D6;
-                border-radius: 6px;
-                background-color: #f9f9f9;
-            }
-            QListWidget::item {
-                padding: 10px;
-                border-bottom: 1px solid #eee;
-            }
-            QListWidget::item:selected {
-                background-color: #34C759;
-                color: white;
-            }
-        """)
-        right_layout.addWidget(self.photo_list)
-        splitter.addWidget(right_group)
-
-        splitter.setSizes([320, 320])
-
-        # 快捷操作按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        reverse_btn = QPushButton("🔃 反转顺序")
-        reverse_btn.setStyleSheet("""
-            QPushButton {
-                padding: 6px 12px; font-size: 12px;
-                background-color: #5856D6; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #3f3ea8; }
-        """)
-        reverse_btn.clicked.connect(self._reverse_photos)
-        btn_layout.addWidget(reverse_btn)
-
-        reset_btn = QPushButton("↩️ 恢复原始")
-        reset_btn.setStyleSheet("""
-            QPushButton {
-                padding: 6px 12px; font-size: 12px;
-                background-color: #8E8E93; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #636366; }
-        """)
-        reset_btn.clicked.connect(self._reset_photos)
-        btn_layout.addWidget(reset_btn)
-
-        layout.addLayout(btn_layout)
-
-        # 底部确认按钮
-        bottom_layout = QHBoxLayout()
-        bottom_layout.addStretch()
-        ok_btn = QPushButton("✅ 确认分配")
-        ok_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 24px; font-size: 13px;
-                background-color: #007AFF; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #0056CC; }
-        """)
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("取消")
-        cancel_btn.clicked.connect(self.reject)
-        bottom_layout.addWidget(ok_btn)
-        bottom_layout.addWidget(cancel_btn)
-        layout.addLayout(bottom_layout)
-
-    def _extract_photos(self):
-        """从采集点数据中提取照片信息，并填充列表"""
-        self.marker_list.clear()
-        self.photo_list.clear()
-        self._photos_data = []
-
-        for idx, m in enumerate(self._markers_data, 1):
-            # 左侧采集点
-            item_text = f"{idx}. [{m['floor_name']}] {m['marker_name']}\n   当前: {m['photo_filename'] or '无'}"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, m['marker_id'])
-            self.marker_list.addItem(item)
-
-            # 右侧照片
-            photo_info = {
-                'marker_id': m['marker_id'],
-                'panoramaPath': m['panoramaPath'],
-                'originalPhotoPath': m['originalPhotoPath'],
-                'photos': m['photos'],
-                'cameraFileName': m['cameraFileName'],
-            }
-            self._photos_data.append(photo_info)
-
-            p_item = QListWidgetItem(f"{idx}. {m['photo_filename'] or '无照片'}")
-            p_item.setData(Qt.ItemDataRole.UserRole, idx - 1)  # 原始索引
-            self.photo_list.addItem(p_item)
-
-    def _reverse_photos(self):
-        """反转照片顺序"""
-        items = []
-        for i in range(self.photo_list.count()):
-            items.append(self.photo_list.takeItem(0))
-        for item in reversed(items):
-            self.photo_list.addItem(item)
-
-    def _reset_photos(self):
-        """恢复原始照片顺序"""
-        self._extract_photos()
-
-    def get_new_order(self) -> List[dict]:
-        """返回新的照片顺序列表，与采集点列表一一对应"""
-        new_order = []
-        for i in range(self.photo_list.count()):
-            orig_idx = self.photo_list.item(i).data(Qt.ItemDataRole.UserRole)
-            new_order.append(self._photos_data[orig_idx])
-        return new_order
-
-
-class PhotoRelationManagerDialog(QDialog):
-    """照片关联关系管理器 - 单点互换、批量重排、跨楼层互换"""
-
-    def __init__(self, project_data: Project, current_floor_id: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("📷 照片关联关系调整")
-        self.resize(900, 650)
-        self.project_data = project_data
-        self.current_floor_id = current_floor_id
-        self.parent_manager = parent
-        self._all_linked_markers: List[dict] = []  # 扁平化的所有已关联采集点
-        self._init_ui()
-        self._refresh_table()
-
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.setContentsMargins(16, 16, 16, 16)
-
-        # 标题与说明
-        title = QLabel("调整已关联采集点与照片的对应关系")
-        title.setStyleSheet("font-size: 16px; font-weight: bold;")
-        layout.addWidget(title)
-
-        hint = QLabel("💡 勾选需要调整的采集点，使用下方按钮进行互换、循环移位或自定义重排。支持跨楼层操作。")
-        hint.setStyleSheet("color: #8E8E93; font-size: 12px;")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-
-        # 筛选
-        filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("显示范围:"))
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItem("全部楼层", "all")
-        if self.project_data and self.project_data.floors:
-            for floor in sorted(self.project_data.floors, key=lambda f: f.get('order', 0), reverse=True):
-                self.filter_combo.addItem(floor.get('name', '未命名'), floor.get('id'))
-        self.filter_combo.addItem("仅当前楼层", "current")
-        self.filter_combo.currentIndexChanged.connect(self._refresh_table)
-        filter_layout.addWidget(self.filter_combo)
-        filter_layout.addStretch()
-
-        self.show_unlinked_cb = QCheckBox("显示未关联采集点（可参与接收照片）")
-        self.show_unlinked_cb.setChecked(False)
-        self.show_unlinked_cb.stateChanged.connect(self._refresh_table)
-        filter_layout.addWidget(self.show_unlinked_cb)
-
-        layout.addLayout(filter_layout)
-
-        # 数据表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["选择", "楼层", "点位名称", "点位ID", "当前照片", "状态"])
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        self.table.setStyleSheet("""
-            QTableWidget {
-                border: 1px solid #D1D1D6;
-                border-radius: 6px;
-                background-color: #f9f9f9;
-            }
-            QHeaderView::section {
-                background-color: #2C2C2E;
-                color: white;
-                padding: 8px;
-                border: 1px solid #444;
-            }
-            QTableWidget::item {
-                padding: 8px;
-            }
-            QTableWidget::item:selected {
-                background-color: #007AFF;
-                color: white;
-            }
-        """)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.table, 1)
-
-        # 操作按钮区
-        ops_group = QGroupBox("批量操作")
-        ops_layout = QHBoxLayout(ops_group)
-
-        # 单点/多点互换
-        swap_btn = QPushButton("互换照片")
-        swap_btn.setToolTip("选中两行，互换它们的照片关联")
-        swap_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 16px; font-size: 13px;
-                background-color: #5856D6; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #3f3ea8; }
-        """)
-        swap_btn.clicked.connect(self._on_swap)
-        ops_layout.addWidget(swap_btn)
-
-        # 循环左移
-        shift_left_btn = QPushButton("⬅️ 循环左移")
-        shift_left_btn.setToolTip("选中多行，照片循环向左移动一位")
-        shift_left_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 16px; font-size: 13px;
-                background-color: #FF9500; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #B36800; }
-        """)
-        shift_left_btn.clicked.connect(lambda: self._on_cycle_shift(-1))
-        ops_layout.addWidget(shift_left_btn)
-
-        # 循环右移
-        shift_right_btn = QPushButton("➡️ 循环右移")
-        shift_right_btn.setToolTip("选中多行，照片循环向右移动一位")
-        shift_right_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 16px; font-size: 13px;
-                background-color: #FF9500; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #B36800; }
-        """)
-        shift_right_btn.clicked.connect(lambda: self._on_cycle_shift(1))
-        ops_layout.addWidget(shift_right_btn)
-
-        # 自定义重排
-        custom_btn = QPushButton("📋 自定义重排")
-        custom_btn.setToolTip("打开拖拽排序对话框，自定义照片分配顺序")
-        custom_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 16px; font-size: 13px;
-                background-color: #34C759; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #248A3D; }
-        """)
-        custom_btn.clicked.connect(self._on_custom_reorder)
-        ops_layout.addWidget(custom_btn)
-
-        # 全选/反选
-        select_all_btn = QPushButton("☑️ 全选")
-        select_all_btn.clicked.connect(self._select_all)
-        ops_layout.addWidget(select_all_btn)
-
-        ops_layout.addStretch()
-        layout.addWidget(ops_group)
-
-        # 底部按钮
-        bottom_layout = QHBoxLayout()
-        bottom_layout.addStretch()
-
-        preview_btn = QPushButton("👁️ 预览变更")
-        preview_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 20px; font-size: 13px;
-                background-color: #5AC8FA; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #4CA0D0; }
-        """)
-        preview_btn.clicked.connect(self._preview_changes)
-        bottom_layout.addWidget(preview_btn)
-
-        ok_btn = QPushButton("💾 保存到项目")
-        ok_btn.setStyleSheet("""
-            QPushButton {
-                padding: 8px 24px; font-size: 13px;
-                background-color: #007AFF; color: white;
-                border: none; border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #0056CC; }
-        """)
-        ok_btn.clicked.connect(self._save_changes)
-        bottom_btn = QPushButton("取消")
-        bottom_btn.clicked.connect(self.reject)
-        bottom_layout.addWidget(ok_btn)
-        bottom_layout.addWidget(bottom_btn)
-        layout.addLayout(bottom_layout)
-
-    def _collect_markers(self) -> List[dict]:
-        """根据筛选条件收集采集点数据"""
-        result = []
-        filter_val = self.filter_combo.currentData()
-        show_unlinked = self.show_unlinked_cb.isChecked()
-
-        for floor in self.project_data.floors:
-            floor_id = floor.get('id', '')
-            floor_name = floor.get('name', '未命名')
-
-            # 筛选
-            if filter_val == 'current' and floor_id != self.current_floor_id:
-                continue
-            if filter_val != 'all' and filter_val != 'current' and floor_id != filter_val:
-                continue
-
-            for marker in floor.get('markers', []):
-                status = marker.get('status', '')
-                if status == 'linked' or (show_unlinked and status in ('pending', 'captured', 'missing')):
-                    result.append({
-                        'marker': marker,
-                        'floor_id': floor_id,
-                        'floor_name': floor_name,
-                    })
-        return result
-
-    def _refresh_table(self):
-        """刷新表格显示"""
-        self._all_linked_markers = self._collect_markers()
-        self.table.setRowCount(len(self._all_linked_markers))
-
-        for row, item in enumerate(self._all_linked_markers):
-            marker = item['marker']
-
-            # 选择框
-            chk = QCheckBox()
-            chk.setChecked(False)
-            self.table.setCellWidget(row, 0, chk)
-
-            # 楼层
-            floor_item = QTableWidgetItem(item['floor_name'])
-            floor_item.setData(Qt.ItemDataRole.UserRole, row)  # 存储行索引
-            floor_item.setFlags(floor_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 1, floor_item)
-
-            # 点位名称
-            name_item = QTableWidgetItem(marker.get('customName', '') or marker.get('id', ''))
-            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 2, name_item)
-
-            # 点位ID
-            id_item = QTableWidgetItem(marker.get('id', ''))
-            id_item.setFlags(id_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 3, id_item)
-
-            # 当前照片
-            photo_name = marker.get('cameraFileName', '') or os.path.basename(marker.get('panoramaPath', '') or '无')
-            photo_item = QTableWidgetItem(photo_name)
-            photo_item.setFlags(photo_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 4, photo_item)
-
-            # 状态
-            status_map = {'linked': '✅ 已关联', 'pending': '⏳ 待采集', 'captured': '📷 已采集', 'missing': '❌ 缺失'}
-            status_item = QTableWidgetItem(status_map.get(marker.get('status', ''), marker.get('status', '')))
-            status_item.setFlags(status_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.table.setItem(row, 5, status_item)
-
-        self.table.resizeColumnsToContents()
-
-    def _get_selected_rows(self) -> List[int]:
-        """获取选中的行索引（按表格显示顺序）"""
-        selected = []
-        for row in range(self.table.rowCount()):
-            chk = self.table.cellWidget(row, 0)
-            if chk and chk.isChecked():
-                selected.append(row)
-        return selected
-
-    def _select_all(self):
-        """全选/反选"""
-        all_checked = True
-        for row in range(self.table.rowCount()):
-            chk = self.table.cellWidget(row, 0)
-            if chk and not chk.isChecked():
-                all_checked = False
-                break
-        for row in range(self.table.rowCount()):
-            chk = self.table.cellWidget(row, 0)
-            if chk:
-                chk.setChecked(not all_checked)
-
-    def _swap_photo_data(self, m1: dict, m2: dict):
-        """互换两个采集点的照片关联字段"""
-        fields = ['panoramaPath', 'originalPhotoPath', 'photos', 'cameraFileName']
-        for f in fields:
-            m1[f], m2[f] = m2[f], m1[f]
-        # 如果某一方原来是未关联状态，互换后需要更新状态
-        # 只要有照片路径就设为 linked
-        for m in (m1, m2):
-            if m.get('panoramaPath') or m.get('originalPhotoPath'):
-                m['status'] = 'linked'
-            else:
-                # 如果失去了照片，回退到 captured（如果原本有采集时间）否则 pending
-                if m.get('captureTime') or m.get('timestamp'):
-                    m['status'] = 'captured'
-                else:
-                    m['status'] = 'pending'
-
-    def _on_swap(self):
-        """单点/多点互换照片"""
-        selected = self._get_selected_rows()
-        if len(selected) != 2:
-            QMessageBox.warning(self, "提示", "请恰好选中 2 个采集点进行互换")
-            return
-
-        row1, row2 = selected
-        marker1 = self._all_linked_markers[row1]['marker']
-        marker2 = self._all_linked_markers[row2]['marker']
-
-        self._swap_photo_data(marker1, marker2)
-        self._refresh_table()
-
-        name1 = marker1.get('customName', '') or marker1.get('id', '')
-        name2 = marker2.get('customName', '') or marker2.get('id', '')
-        QMessageBox.information(self, "互换成功", f"已互换:\n• {name1}\n• {name2}")
-
-    def _on_cycle_shift(self, direction: int):
-        """循环移位照片：direction=1 右移, -1 左移"""
-        selected = self._get_selected_rows()
-        if len(selected) < 2:
-            QMessageBox.warning(self, "提示", "请至少选中 2 个采集点")
-            return
-
-        # 获取选中的 marker 数据
-        markers = [self._all_linked_markers[r]['marker'] for r in selected]
-
-        # 提取照片信息
-        photo_infos = []
-        for m in markers:
-            photo_infos.append({
-                'panoramaPath': m.get('panoramaPath', ''),
-                'originalPhotoPath': m.get('originalPhotoPath', ''),
-                'photos': m.get('photos', []),
-                'cameraFileName': m.get('cameraFileName', ''),
-            })
-
-        # 循环移位
-        n = len(photo_infos)
-        if direction == 1:  # 右移：最后一个移到第一个
-            shifted = [photo_infos[-1]] + photo_infos[:-1]
-        else:  # 左移：第一个移到最后一个
-            shifted = photo_infos[1:] + [photo_infos[0]]
-
-        # 写回
-        for m, info in zip(markers, shifted):
-            m['panoramaPath'] = info['panoramaPath']
-            m['originalPhotoPath'] = info['originalPhotoPath']
-            m['photos'] = info['photos']
-            m['cameraFileName'] = info['cameraFileName']
-            # 更新状态
-            if m['panoramaPath'] or m['originalPhotoPath']:
-                m['status'] = 'linked'
-            else:
-                m['status'] = 'captured' if (m.get('captureTime') or m.get('timestamp')) else 'pending'
-
-        self._refresh_table()
-        shift_name = "右移" if direction == 1 else "左移"
-        QMessageBox.information(self, "完成", f"已循环{shift_name} {n} 个采集点的照片")
-
-    def _on_custom_reorder(self):
-        """打开自定义重排对话框"""
-        selected = self._get_selected_rows()
-        if len(selected) < 2:
-            QMessageBox.warning(self, "提示", "请至少选中 2 个采集点进行自定义重排")
-            return
-
-        # 准备数据
-        markers_data = []
-        for r in selected:
-            item = self._all_linked_markers[r]
-            marker = item['marker']
-            markers_data.append({
-                'marker_id': marker.get('id', ''),
-                'marker_name': marker.get('customName', '') or marker.get('id', ''),
-                'floor_name': item['floor_name'],
-                'photo_filename': marker.get('cameraFileName', '') or os.path.basename(marker.get('panoramaPath', '') or '无'),
-                'panoramaPath': marker.get('panoramaPath', ''),
-                'originalPhotoPath': marker.get('originalPhotoPath', ''),
-                'photos': marker.get('photos', []),
-                'cameraFileName': marker.get('cameraFileName', ''),
-            })
-
-        dialog = PhotoReorderDialog(markers_data, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        new_order = dialog.get_new_order()
-        markers = [self._all_linked_markers[r]['marker'] for r in selected]
-
-        # 应用新顺序
-        for m, info in zip(markers, new_order):
-            m['panoramaPath'] = info['panoramaPath']
-            m['originalPhotoPath'] = info['originalPhotoPath']
-            m['photos'] = info['photos']
-            m['cameraFileName'] = info['cameraFileName']
-            if m['panoramaPath'] or m['originalPhotoPath']:
-                m['status'] = 'linked'
-            else:
-                m['status'] = 'captured' if (m.get('captureTime') or m.get('timestamp')) else 'pending'
-
-        self._refresh_table()
-        QMessageBox.information(self, "完成", f"已按自定义顺序重新分配 {len(selected)} 个采集点的照片")
-
-    def _preview_changes(self):
-        """预览当前表格中的关联状态"""
-        lines = []
-        for item in self._all_linked_markers:
-            marker = item['marker']
-            name = marker.get('customName', '') or marker.get('id', '')
-            photo = marker.get('cameraFileName', '') or os.path.basename(marker.get('panoramaPath', '') or '无')
-            lines.append(f"[{item['floor_name']}] {name} → {photo}")
-        QMessageBox.information(self, "当前关联预览", "\n".join(lines[:50]) + ("\n..." if len(lines) > 50 else ""))
-
-    def _save_changes(self):
-        """保存修改到项目"""
-        if self.parent_manager:
-            self.parent_manager._push_history()
-            self.parent_manager._save_project()
-            self.parent_manager._refresh_markers()
-            self.parent_manager.import_status_label.setText("✅ 照片关联关系已调整并保存")
-        self.accept()
-
 class PanoramaManager(QMainWindow):
     # 方向更新信号（从HTTP服务器线程传递到主线程）
     direction_update = pyqtSignal(str, float)
@@ -3661,7 +3072,6 @@ class PanoramaManager(QMainWindow):
             lambda: self._toggle_adjust_mode(self.current_marker.id) if hasattr(self, 'current_marker') and self.current_marker else None
         )
         self.floating_toolbar.set_all_clicked.connect(self._set_all_sectors_direction)
-        self.floating_toolbar.photo_relation_clicked.connect(self._open_photo_relation_manager)
         # 标记点尺寸变化
         self.floating_toolbar.marker_size_changed.connect(self._on_marker_size_changed)
         # 应用初始标记点尺寸
@@ -4491,10 +3901,6 @@ class PanoramaManager(QMainWindow):
             self.floating_toolbar.buttons['delete'].setEnabled(has_marker)
         if 'adjust' in self.floating_toolbar.buttons:
             self.floating_toolbar.buttons['adjust'].setEnabled(has_marker)
-        # photo_relation 不需要选中点位，只要有项目数据即可启用
-        if 'photo_relation' in self.floating_toolbar.buttons:
-            has_project = self.project_data is not None
-            self.floating_toolbar.buttons['photo_relation'].setEnabled(has_project)
 
     # -------------------------------------------------------------------------
     # 悬浮工具栏设置
@@ -4523,15 +3929,6 @@ class PanoramaManager(QMainWindow):
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"[警告] 保存工具栏设置失败: {e}")
-
-    def _open_photo_relation_manager(self):
-        """打开照片关联关系管理器"""
-        if not self.project_data or not self.project_data.floors:
-            QMessageBox.warning(self, "提示", "请先加载项目")
-            return
-        self._push_history()
-        dialog = PhotoRelationManagerDialog(self.project_data, self.current_floor_id, self)
-        dialog.exec()
 
     def _show_toolbar_settings(self):
         dialog = FloatingToolbarSettingsDialog(self._toolbar_settings, self)
@@ -4808,13 +4205,6 @@ class PanoramaManager(QMainWindow):
         tools_menu.addAction(style_settings_action)
         # 帮助菜单
         help_menu = menubar.addMenu("帮助(&H)")
-
-        tools_menu.addSeparator()
-        
-        photo_relation_action = QAction("调整照片关联关系(&R)...", self)
-        photo_relation_action.setToolTip("单点互换、批量重排、跨楼层互换已关联的照片")
-        photo_relation_action.triggered.connect(self._open_photo_relation_manager)
-        tools_menu.addAction(photo_relation_action)
         
         about_action = QAction("关于(&A)", self)
         about_action.triggered.connect(self.show_about)
@@ -8139,9 +7529,9 @@ function zoomIn() {
             
             const config = {
                 autoLoad: true,
-                compass: false,  // 禁用原生指南针，使用自定义
-                showFullscreenCtrl: true,
-                showZoomCtrl: true,
+                compass: false,
+                showFullscreenCtrl: false,
+                showZoomCtrl: false,
                 title: marker.customName || '',
                 orientationOnByDefault: isGyroEnabled,
                 friction: 0.1,
@@ -10078,10 +9468,7 @@ function jumpToMarker(targetId) {
             sector_action = QAction("显示/隐藏单点扇形", self)
             adjust_action = QAction("调整单点扇形视线方向", self)
             set_all_action = QAction("调整所有点扇形视线方向", self)
-            swap_photo_action = QAction("互换关联照片", self)
-            swap_photo_action.setToolTip("打开照片关联关系管理器")
-            swap_photo_action.triggered.connect(self._open_photo_relation_manager)
-            menu.addAction(swap_photo_action)            
+            
             menu.addAction(relink_action)
             menu.addAction(delete_action)
             menu.addSeparator()
@@ -11150,11 +10537,12 @@ function jumpToMarker(targetId) {
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.9.9</h2>
+            """<h2>随系 · 影像管理器 V1.9.6</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>
-            <p>作者: huangkeqi</p>""")
+            <p>作者: huangkeqi</p>
+            <p>项目主页: https://github.com/huangkeqi-cmd/suixi-system</p>""")
 
 
     def closeEvent(self, event):

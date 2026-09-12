@@ -6,6 +6,7 @@ Copyright (c) 2026 huangkeqi
 保留所有权利。
 
 本软件目前为个人工作流工具，开源供学习参考。
+项目主页：https://github.com/huangkeqi-cmd/suixi-system
 """
 
 # 影像管理器主入口
@@ -1641,13 +1642,6 @@ class FloorplanCanvas(QGraphicsView):
             text = QGraphicsTextItem(str(label))
             text.setPos(pixel_x + radius + 2, pixel_y - radius)
             text.setDefaultTextColor(QColor(255, 255, 255))
-            # 给文字加黑色描边，增强任意背景下的可读性
-            from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(2)
-            shadow.setColor(QColor(0, 0, 0))
-            shadow.setOffset(1, 1)
-            text.setGraphicsEffect(shadow)
             text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)  # 文本不拦截鼠标
             self.scene.addItem(text)
             self.text_items.append(text)
@@ -11150,11 +11144,12 @@ function jumpToMarker(targetId) {
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.9.9</h2>
+            """<h2>随系 · 影像管理器 V1.9.8</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>
-            <p>作者: huangkeqi</p>""")
+            <p>作者: huangkeqi</p>
+            <p>项目主页: https://github.com/huangkeqi-cmd/suixi-system</p>""")
 
 
     def closeEvent(self, event):

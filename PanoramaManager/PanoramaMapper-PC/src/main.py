@@ -2736,6 +2736,1488 @@ class StyleManager:
                 """)
 
 
+class FloorEditDialog(QDialog):
+    """楼层编辑对话框 - 用于新建项目时添加/编辑单个楼层
+
+    参照采集端"楼层管理"逻辑：
+    - 楼层名称支持从标准列表（B10~B1, 1F~250F）+ 特殊楼层下拉选择
+    - 自动冲突检测（同名楼层提示处理）
+    - 平面图预览 + 从文件名识别楼层
+    """
+
+    STANDARD_FLOORS = (
+        [f'B{i}' for i in range(10, 0, -1)] +
+        [f'{i}F' for i in range(1, 251)]
+    )
+    SPECIAL_FLOORS = ['RF', '设备层', '避难层', '架空层', '管线夹层', '屋顶层']
+
+    def __init__(self, parent=None, floor_data=None, existing_names=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑楼层" if floor_data else "添加楼层")
+        self.resize(560, 400)
+        self._floor_data = floor_data or {}
+        self._existing_names = set(existing_names or set())
+        self._original_name = self._floor_data.get('name', '')
+        if self._original_name and self._original_name in self._existing_names:
+            self._existing_names = self._existing_names - {self._original_name}
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # 楼层名称（可编辑下拉框）
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("楼层名称:"))
+        self.name_combo = QComboBox()
+        self.name_combo.setEditable(True)
+        self.name_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.name_combo.setMinimumWidth(180)
+        for name in self.STANDARD_FLOORS:
+            self.name_combo.addItem(name)
+        self.name_combo.insertSeparator(self.name_combo.count())
+        for name in self.SPECIAL_FLOORS:
+            self.name_combo.addItem(name)
+        init_name = self._floor_data.get('name', '')
+        if init_name:
+            self.name_combo.setEditText(init_name)
+        else:
+            self.name_combo.setEditText(self._suggest_default_name())
+        name_row.addWidget(self.name_combo, 1)
+        layout.addLayout(name_row)
+
+        # 排序序号
+        order_row = QHBoxLayout()
+        order_row.addWidget(QLabel("排序序号:"))
+        self.order_spin = QSpinBox()
+        self.order_spin.setRange(-1000, 1000)
+        self.order_spin.setValue(self._floor_data.get('order', 0))
+        self.order_spin.setToolTip("数值越大越靠前显示（高楼层通常排在上面）")
+        order_row.addWidget(self.order_spin)
+        order_row.addWidget(QLabel("（数值越大越靠前，可稍后在上层对话框调整）"))
+        order_row.addStretch()
+        layout.addLayout(order_row)
+
+        # 平面图
+        plan_row = QHBoxLayout()
+        plan_row.addWidget(QLabel("平面图:"))
+        self.plan_path_edit = QLineEdit()
+        self.plan_path_edit.setText(self._floor_data.get('plan_path', ''))
+        self.plan_path_edit.setReadOnly(True)
+        self.plan_path_edit.setPlaceholderText("可选，点击「浏览」选择平面图文件")
+        plan_row.addWidget(self.plan_path_edit, 1)
+
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(self._browse_plan)
+        plan_row.addWidget(browse_btn)
+
+        clear_btn = QPushButton("清除")
+        clear_btn.clicked.connect(self._clear_plan)
+        plan_row.addWidget(clear_btn)
+        layout.addLayout(plan_row)
+
+        # 识别按钮
+        detect_row = QHBoxLayout()
+        detect_btn = QPushButton("🔍 从平面图文件名识别楼层")
+        detect_btn.setToolTip("根据平面图文件名自动识别楼层名称（如 3F.jpg → 3F）")
+        detect_btn.setStyleSheet("""
+            QPushButton {
+                padding: 6px 14px; font-size: 12px;
+                background-color: #5856D6; color: white;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #3F3EA8; }
+        """)
+        detect_btn.clicked.connect(self._detect_floor_name)
+        detect_row.addWidget(detect_btn)
+        detect_row.addStretch()
+        layout.addLayout(detect_row)
+
+        # 平面图预览
+        preview_container = QHBoxLayout()
+        preview_container.addWidget(QLabel("预览:"))
+        self.plan_preview = QLabel()
+        self.plan_preview.setFixedSize(200, 130)
+        self.plan_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.plan_preview.setStyleSheet("""
+            QLabel {
+                background-color: #F5F5F7;
+                border: 1px dashed #C7C7CC;
+                border-radius: 8px;
+                color: #8E8E93;
+                font-size: 11px;
+            }
+        """)
+        self.plan_preview.setText("无平面图")
+        preview_container.addWidget(self.plan_preview)
+        preview_container.addStretch()
+        layout.addLayout(preview_container)
+
+        hint = QLabel("💡 提示：平面图导入时会自动转为 JPG 格式，无需手动处理")
+        hint.setStyleSheet("color: #8E8E93; font-size: 11px;")
+        layout.addWidget(hint)
+
+        layout.addStretch()
+
+        # 底部按钮
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        ok_btn = QPushButton("确定")
+        ok_btn.setDefault(True)
+        ok_btn.setStyleSheet("""
+            QPushButton { padding: 6px 24px; background-color: #007AFF; color: white;
+                          border: none; border-radius: 6px; font-size: 13px; }
+            QPushButton:hover { background-color: #0056CC; }
+        """)
+        ok_btn.clicked.connect(self._on_ok)
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(cancel_btn)
+        layout.addLayout(btn_row)
+
+        self._update_plan_preview()
+
+    def _suggest_default_name(self):
+        for name in self.STANDARD_FLOORS:
+            if name not in self._existing_names:
+                return name
+        return "新楼层"
+
+    def _browse_plan(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择平面图", "",
+            "图片文件 (*.jpg *.jpeg *.png *.bmp *.webp);;所有文件 (*.*)"
+        )
+        if path:
+            self.plan_path_edit.setText(path)
+            self._update_plan_preview()
+            current_name = self.name_combo.currentText().strip()
+            if not current_name or current_name == "新楼层":
+                detected = self._extract_floor_name_from_file(path)
+                if detected:
+                    self.name_combo.setEditText(detected)
+
+    def _clear_plan(self):
+        self.plan_path_edit.clear()
+        self._update_plan_preview()
+
+    def _update_plan_preview(self):
+        path = self.plan_path_edit.text().strip()
+        if not path or not os.path.exists(path):
+            self.plan_preview.setPixmap(QPixmap())
+            self.plan_preview.setText("无平面图")
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self.plan_preview.setPixmap(QPixmap())
+            self.plan_preview.setText("无法加载图片")
+            return
+        target_w = self.plan_preview.width() - 8
+        target_h = self.plan_preview.height() - 8
+        scaled = pixmap.scaled(
+            target_w, target_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.plan_preview.setPixmap(scaled)
+        self.plan_preview.setText("")
+
+    def _detect_floor_name(self):
+        path = self.plan_path_edit.text().strip()
+        if not path:
+            QMessageBox.information(self, "提示", "请先选择平面图")
+            return
+        detected = self._extract_floor_name_from_file(path)
+        if detected:
+            self.name_combo.setEditText(detected)
+            QMessageBox.information(self, "识别成功", f"已识别楼层名称：{detected}")
+        else:
+            QMessageBox.warning(self, "识别失败", "未能从文件名识别出楼层名称")
+
+    @staticmethod
+    def _extract_floor_name_from_file(file_path):
+        name = os.path.splitext(os.path.basename(file_path))[0]
+        m = re.match(r'^(\d+)[Ff层]', name)
+        if m:
+            return m.group(1) + 'F'
+        m = re.match(r'^([Bb][\d]+)', name)
+        if m:
+            return m.group(1).upper()
+        if re.search(r'([Rr][Ff]|屋顶|顶层|屋面)', name):
+            return 'RF'
+        return None
+
+    def _on_ok(self):
+        name = self.name_combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "请输入楼层名称")
+            return
+
+        if name in self._existing_names:
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("楼层名称冲突")
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setText(f"楼层名称「{name}」已被其他楼层占用！\n\n请选择处理方式：")
+            btn_new_suffix = msg_box.addButton("新名称加后缀", QMessageBox.ButtonRole.ActionRole)
+            btn_old_suffix = msg_box.addButton("提示手动处理", QMessageBox.ButtonRole.ActionRole)
+            btn_rename = msg_box.addButton("改回原名称", QMessageBox.ButtonRole.ActionRole)
+            msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            msg_box.exec()
+
+            clicked = msg_box.clickedButton()
+            if clicked == btn_new_suffix:
+                base = name
+                suffix = 1
+                while f"{base}_{suffix}" in self._existing_names:
+                    suffix += 1
+                self.name_combo.setEditText(f"{base}_{suffix}")
+                self.accept()
+                return
+            elif clicked == btn_old_suffix:
+                QMessageBox.information(
+                    self, "提示",
+                    "请先在楼层列表中，将已有同名楼层重命名后再操作。\n"
+                    "或选择「新名称加后缀」自动处理。"
+                )
+                return
+            elif clicked == btn_rename:
+                if self._original_name:
+                    self.name_combo.setEditText(self._original_name)
+                return
+            else:
+                return
+
+        self.accept()
+
+    def get_data(self):
+        return {
+            'name': self.name_combo.currentText().strip(),
+            'order': self.order_spin.value(),
+            'plan_path': self.plan_path_edit.text().strip(),
+        }
+
+
+class NewProjectDialog(QDialog):
+    """新建项目对话框 - 手动管理楼层与平面图
+
+    参照采集端楼层管理逻辑：
+    - 快速添加按钮（+1层、+5层、+B1、+RF、自定义）
+    - 自动排序（B层 → 数字层 → RF，支持正/逆序切换）
+    - 楼层预览、平面图状态显示
+    - 楼层重命名、删除、上下移动
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("新建项目")
+        self.resize(820, 720)
+        self._floors = []
+        self._auto_sort_reverse = False
+        self._init_ui()
+        self._refresh_floor_list()
+
+    def _btn_style(self, bg, hover):
+        return f"""
+            QPushButton {{
+                padding: 6px 12px; background-color: {bg}; color: white;
+                border: none; border-radius: 6px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {hover}; }}
+        """
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # 项目信息
+        info_group = QGroupBox("项目信息")
+        info_layout = QGridLayout(info_group)
+        info_layout.setSpacing(10)
+
+        info_layout.addWidget(QLabel("项目名称:"), 0, 0)
+        self.project_name_edit = QLineEdit("新建项目")
+        self.project_name_edit.setPlaceholderText("请输入项目名称")
+        info_layout.addWidget(self.project_name_edit, 0, 1, 1, 2)
+
+        info_layout.addWidget(QLabel("输出目录:"), 1, 0)
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setReadOnly(True)
+        self.output_dir_edit.setPlaceholderText("点击「浏览」选择项目保存位置...")
+        info_layout.addWidget(self.output_dir_edit, 1, 1)
+
+        browse_btn = QPushButton("浏览...")
+        browse_btn.clicked.connect(self._browse_output)
+        info_layout.addWidget(browse_btn, 1, 2)
+
+        layout.addWidget(info_group)
+
+        # 楼层列表
+        floor_group = QGroupBox("楼层列表（双击可编辑；数值大的楼层显示在前面）")
+        floor_layout = QVBoxLayout(floor_group)
+
+        # 快速添加行
+        quick_row = QHBoxLayout()
+        quick_label = QLabel("⚡ 快速添加:")
+        quick_label.setStyleSheet("font-size: 12px; color: #8E8E93; font-weight: 600;")
+        quick_row.addWidget(quick_label)
+
+        btn_add1 = QPushButton("+1层")
+        btn_add1.setToolTip("添加下一个数字楼层")
+        btn_add1.setStyleSheet(self._btn_style("#34C759", "#248A3D"))
+        btn_add1.clicked.connect(lambda: self._quick_add_floors(1))
+        quick_row.addWidget(btn_add1)
+
+        btn_add5 = QPushButton("+5层")
+        btn_add5.setToolTip("连续添加 5 个数字楼层")
+        btn_add5.setStyleSheet(self._btn_style("#0A84FF", "#0056CC"))
+        btn_add5.clicked.connect(lambda: self._quick_add_floors(5))
+        quick_row.addWidget(btn_add5)
+
+        btn_basement = QPushButton("+B1")
+        btn_basement.setToolTip("添加下一个地下层（B1、B2...）")
+        btn_basement.setStyleSheet(self._btn_style("#FF9500", "#B36800"))
+        btn_basement.clicked.connect(self._quick_add_basement)
+        quick_row.addWidget(btn_basement)
+
+        btn_roof = QPushButton("+RF")
+        btn_roof.setToolTip("添加屋顶层")
+        btn_roof.setStyleSheet(self._btn_style("#FF3B30", "#B32418"))
+        btn_roof.clicked.connect(self._quick_add_roof)
+        quick_row.addWidget(btn_roof)
+
+        btn_custom = QPushButton("自定义")
+        btn_custom.setToolTip("自定义楼层名称")
+        btn_custom.setStyleSheet(self._btn_style("#5856D6", "#3F3EA8"))
+        btn_custom.clicked.connect(self._quick_add_custom)
+        btn_batch = QPushButton("📚 批量平面")
+        btn_batch.setToolTip("批量导入平面图，自动从文件名识别楼层名\n支持 JPG/PNG/BMP/WEBP/TIFF/PDF")
+        btn_batch.setStyleSheet(self._btn_style("#00BCD4", "#00838F"))
+        btn_batch.clicked.connect(self._batch_import_plans)
+        quick_row.addWidget(btn_batch)
+        quick_row.addWidget(btn_custom)
+
+        quick_row.addStretch()
+        floor_layout.addLayout(quick_row)
+
+        # 楼层列表控件
+        self.floor_list = QListWidget()
+        self.floor_list.setMinimumHeight(240)
+        self.floor_list.setAlternatingRowColors(True)
+        self.floor_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #D1D1D6;
+                border-radius: 6px;
+                background-color: #F9F9F9;
+            }
+            QListWidget::item { padding: 8px; border-bottom: 1px solid #EEE; }
+            QListWidget::item:alternate { background-color: #FFFFFF; }
+            QListWidget::item:selected { background-color: #007AFF; color: white; }
+        """)
+        self.floor_list.itemDoubleClicked.connect(lambda _: self._edit_floor())
+        floor_layout.addWidget(self.floor_list)
+
+        # 编辑按钮行
+        edit_row = QHBoxLayout()
+
+        edit_btn = QPushButton("✏️ 编辑")
+        edit_btn.clicked.connect(self._edit_floor)
+        edit_row.addWidget(edit_btn)
+
+        del_btn = QPushButton("🗑️ 删除")
+        del_btn.setStyleSheet(self._btn_style("#FF3B30", "#B32418"))
+        del_btn.clicked.connect(self._delete_floor)
+        edit_row.addWidget(del_btn)
+
+        edit_row.addSpacing(20)
+
+        up_btn = QPushButton("⬆️ 上移")
+        up_btn.clicked.connect(lambda: self._move_floor(-1))
+        edit_row.addWidget(up_btn)
+
+        down_btn = QPushButton("⬇️ 下移")
+        down_btn.clicked.connect(lambda: self._move_floor(1))
+        edit_row.addWidget(down_btn)
+
+        edit_row.addSpacing(20)
+
+        sort_btn = QPushButton("🔃 自动排序")
+        sort_btn.setToolTip("按名称智能排序（RF → 数字层 → B层），再次点击切换正/逆序")
+        sort_btn.setStyleSheet(self._btn_style("#5856D6", "#3F3EA8"))
+        sort_btn.clicked.connect(self._auto_sort_floors)
+        edit_row.addWidget(sort_btn)
+
+        edit_row.addStretch()
+        floor_layout.addLayout(edit_row)
+
+        layout.addWidget(floor_group)
+
+        # 底部按钮
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+
+        ok_btn = QPushButton("✅ 创建项目")
+        ok_btn.setStyleSheet("""
+            QPushButton {
+                padding: 8px 28px; font-size: 13px;
+                background-color: #007AFF; color: white;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #0056CC; }
+        """)
+        ok_btn.clicked.connect(self._on_ok)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+
+        bottom.addWidget(ok_btn)
+        bottom.addWidget(cancel_btn)
+        layout.addLayout(bottom)
+
+    def _existing_names(self):
+        return {f['name'] for f in self._floors}
+
+    def _next_floor_name(self):
+        max_num = 0
+        for f in self._floors:
+            m = re.match(r'^(\d+)F$', f['name'], re.IGNORECASE)
+            if m:
+                n = int(m.group(1))
+                if n > max_num:
+                    max_num = n
+        return f"{max_num + 1}F" if max_num > 0 else "1F"
+
+    def _make_unique(self, base_name):
+        existing = self._existing_names()
+        if base_name not in existing:
+            return base_name
+        suffix = 1
+        while f"{base_name}_{suffix}" in existing:
+            suffix += 1
+        return f"{base_name}_{suffix}"
+
+    def _add_floor_with_name(self, name):
+        max_order = max([f['order'] for f in self._floors], default=-1)
+        self._floors.append({
+            'name': name,
+            'order': max_order + 1,
+            'plan_path': ''
+        })
+
+    def _quick_add_floors(self, count):
+        for _ in range(count):
+            name = self._next_floor_name()
+            name = self._make_unique(name)
+            self._add_floor_with_name(name)
+        self._refresh_floor_list()
+
+    def _quick_add_basement(self):
+        max_b = 0
+        for f in self._floors:
+            m = re.match(r'^B(\d+)$', f['name'], re.IGNORECASE)
+            if m:
+                max_b = max(max_b, int(m.group(1)))
+        name = self._make_unique(f"B{max_b + 1}")
+        self._add_floor_with_name(name)
+        self._refresh_floor_list()
+
+    def _quick_add_roof(self):
+        candidates = ['RF', '屋顶层', '阁楼层', 'R层']
+        existing = self._existing_names()
+        name = None
+        for c in candidates:
+            if c not in existing:
+                name = c
+                break
+        if not name:
+            name = self._make_unique('RF')
+        self._add_floor_with_name(name)
+        self._refresh_floor_list()
+
+    def _quick_add_custom(self):
+        name, ok = QInputDialog.getText(self, "自定义楼层", "请输入楼层名称：", text="")
+        if ok and name.strip():
+            name = self._make_unique(name.strip())
+            self._add_floor_with_name(name)
+            self._refresh_floor_list()
+
+    def _batch_import_plans(self):
+        """批量导入平面图，自动从文件名识别楼层名（项目未落盘，用临时文件）"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择平面图文件（可多选）", "",
+            "平面图 (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff *.pdf);;"
+            "图片 (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff);;"
+            "PDF (*.pdf);;所有文件 (*.*)"
+        )
+        if not files:
+            return
+
+        success = 0
+        skipped = 0
+        failed = 0
+        failed_files = []
+        skipped_files = []
+        existing_names = {f['name'] for f in self._floors}
+
+        # 临时目录存放 PDF 转换后的图片
+        temp_dir = os.path.join(tempfile.gettempdir(), "suixi_batch_plans")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        for file_path in files:
+            filename = os.path.basename(file_path)
+            ext = os.path.splitext(file_path)[1].lower()
+
+            floor_name = self._extract_floor_name_from_file(filename)
+            if not floor_name:
+                floor_name = os.path.splitext(filename)[0][:20] or "未命名"
+
+            if floor_name in existing_names:
+                skipped += 1
+                skipped_files.append(f"{filename} → {floor_name}")
+                continue
+
+            final_path = file_path
+
+            if ext == '.pdf':
+                try:
+                    img = self._pdf_to_pil(file_path)
+                    if img is None:
+                        failed += 1
+                        failed_files.append(f"{filename}（PDF 转换失败，请安装 PyMuPDF/pdf2image/pypdfium2）")
+                        continue
+                    tmp_jpg = os.path.join(
+                        temp_dir,
+                        f"{int(datetime.now().timestamp() * 1000)}_{success}.jpg"
+                    )
+                    img.save(tmp_jpg, 'JPEG', quality=92)
+                    final_path = tmp_jpg
+                except Exception as e:
+                    failed += 1
+                    failed_files.append(f"{filename}（{e}）")
+                    continue
+            else:
+                # 验证图片可读
+                try:
+                    test_img = Image.open(file_path)
+                    test_img.verify()
+                except Exception as e:
+                    failed += 1
+                    failed_files.append(f"{filename}（图片无效：{e}）")
+                    continue
+
+            max_order = max([f['order'] for f in self._floors], default=-1)
+            self._floors.append({
+                'name': floor_name,
+                'order': max_order + 1,
+                'plan_path': final_path,
+            })
+            existing_names.add(floor_name)
+            success += 1
+
+        self._refresh_floor_list()
+        self._show_batch_report(success, skipped, failed, skipped_files, failed_files)
+
+    @staticmethod
+    def _extract_floor_name_from_file(filename):
+        """从文件名提取楼层名（与 FloorEditDialog 中的逻辑一致）"""
+        name = os.path.splitext(filename)[0]
+
+        # 1) 数字+F/层/楼：1F、2F、3层、5楼、1F平面图
+        m = re.match(r'^(\d+)\s*[Ff层楼]', name)
+        if m:
+            return m.group(1) + 'F'
+
+        # 2) 地下室：B1、B2
+        m = re.match(r'^([Bb][\d]+)', name)
+        if m:
+            return m.group(1).upper()
+
+        # 3) -1F、-2F 形式
+        m = re.match(r'^-(\d+)[Ff]', name)
+        if m:
+            return f"B{m.group(1)}"
+
+        # 4) 负一层、地下二层
+        m = re.match(r'^(负|地下)([一二三四五六七八九十\d]+)[层楼]?', name)
+        if m:
+            cn_num_map = {'一': '1', '二': '2', '三': '3', '四': '4', '五': '5',
+                          '六': '6', '七': '7', '八': '8', '九': '9', '十': '10'}
+            num_str = m.group(2)
+            num = cn_num_map.get(num_str, num_str)
+            return f"B{num}"
+
+        # 5) 屋顶：RF、屋顶、顶层、屋面
+        if re.search(r'([Rr][Ff]|屋顶|顶层|屋面)', name):
+            return 'RF'
+
+        return None
+
+    @staticmethod
+    def _pdf_to_pil(pdf_path, dpi=150):
+        """PDF 首页转 PIL Image - 依次尝试三种库"""
+        # 方式1: PyMuPDF（推荐，性能最好）
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            page = doc[0]
+            zoom = dpi / 72
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+            return img
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[PDF] PyMuPDF 处理失败: {e}")
+
+        # 方式2: pdf2image（需要 poppler）
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(pdf_path, dpi=dpi, first_page=1, last_page=1)
+            if images:
+                return images[0]
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[PDF] pdf2image 处理失败: {e}")
+
+        # 方式3: pypdfium2
+        try:
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(pdf_path)
+            page = pdf[0]
+            bitmap = page.render(scale=dpi / 72)
+            pil_image = bitmap.to_pil()
+            pdf.close()
+            return pil_image
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[PDF] pypdfium2 处理失败: {e}")
+
+        return None
+
+    def _show_batch_report(self, success, skipped, failed, skipped_files, failed_files):
+        """统一显示批量导入报告"""
+        msg_lines = [f"✅ 成功导入 {success} 个楼层"]
+        if skipped > 0:
+            msg_lines.append(f"\n⏭️ 跳过 {skipped} 个（名称重复）：")
+            msg_lines.extend(f"  • {s}" for s in skipped_files[:5])
+            if len(skipped_files) > 5:
+                msg_lines.append(f"  • ...还有 {len(skipped_files) - 5} 个")
+        if failed > 0:
+            msg_lines.append(f"\n❌ 失败 {failed} 个：")
+            msg_lines.extend(f"  • {s}" for s in failed_files[:5])
+            if len(failed_files) > 5:
+                msg_lines.append(f"  • ...还有 {len(failed_files) - 5} 个")
+        QMessageBox.information(self, "批量导入完成", "\n".join(msg_lines))
+
+    def _auto_sort_floors(self):
+        roof, normal, base, other = [], [], [], []
+        for f in self._floors:
+            n = f['name'].upper()
+            if n == 'RF' or '屋顶' in f['name'] or '顶层' in f['name']:
+                roof.append(f)
+            elif re.match(r'^B\d+$', n):
+                base.append(f)
+            elif re.match(r'^\d+F$', n):
+                normal.append(f)
+            else:
+                other.append(f)
+
+        if self._auto_sort_reverse:
+            normal.sort(key=lambda x: int(re.match(r'^(\d+)', x['name']).group(1)))
+            base.sort(key=lambda x: -int(x['name'][1:]))
+            sorted_floors = base + other + normal + roof
+            msg = "✅ 已自动排序（逆序：深→高）"
+        else:
+            normal.sort(key=lambda x: -int(re.match(r'^(\d+)', x['name']).group(1)))
+            base.sort(key=lambda x: int(x['name'][1:]))
+            sorted_floors = roof + normal + other + base
+            msg = "✅ 已自动排序（正序：高→深）"
+
+        self._auto_sort_reverse = not self._auto_sort_reverse
+        n = len(sorted_floors)
+        for i, f in enumerate(sorted_floors):
+            f['order'] = n - i
+
+        self._refresh_floor_list()
+        QMessageBox.information(self, "自动排序", msg)
+
+    def _browse_output(self):
+        path = QFileDialog.getExistingDirectory(self, "选择项目输出目录")
+        if path:
+            self.output_dir_edit.setText(path)
+
+    def _refresh_floor_list(self):
+        self.floor_list.clear()
+        sorted_pairs = sorted(
+            enumerate(self._floors),
+            key=lambda x: (-x[1]['order'], x[0])
+        )
+        for orig_idx, f in sorted_pairs:
+            has_plan = bool(f.get('plan_path') and os.path.exists(f['plan_path']))
+            if has_plan:
+                plan_info = f"📷 {os.path.basename(f['plan_path'])}"
+            else:
+                plan_info = "⚠️ 无平面图"
+            text = f"[序号 {f['order']}]  {f['name']}   —   {plan_info}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, orig_idx)
+            self.floor_list.addItem(item)
+
+    def _add_floor(self):
+        default_order = max([f['order'] for f in self._floors], default=-1) + 1
+        dialog = FloorEditDialog(
+            self,
+            {'name': '', 'order': default_order, 'plan_path': ''},
+            existing_names=self._existing_names()
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._floors.append(dialog.get_data())
+            self._refresh_floor_list()
+
+    def _edit_floor(self):
+        item = self.floor_list.currentItem()
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        dialog = FloorEditDialog(
+            self,
+            self._floors[orig_idx],
+            existing_names=self._existing_names()
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._floors[orig_idx] = dialog.get_data()
+            self._refresh_floor_list()
+
+    def _delete_floor(self):
+        item = self.floor_list.currentItem()
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        name = self._floors[orig_idx]['name']
+        reply = QMessageBox.question(
+            self, "确认删除", f"确定删除楼层「{name}」吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._floors.pop(orig_idx)
+            self._refresh_floor_list()
+
+    def _move_floor(self, direction):
+        item = self.floor_list.currentItem()
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+
+        sorted_indices = sorted(
+            range(len(self._floors)),
+            key=lambda i: (-self._floors[i]['order'], i)
+        )
+        current_pos = sorted_indices.index(orig_idx)
+        target_pos = current_pos + direction
+        if target_pos < 0 or target_pos >= len(sorted_indices):
+            return
+
+        sorted_indices[current_pos], sorted_indices[target_pos] = \
+            sorted_indices[target_pos], sorted_indices[current_pos]
+
+        n = len(sorted_indices)
+        for pos, idx in enumerate(sorted_indices):
+            self._floors[idx]['order'] = n - pos
+
+        self._refresh_floor_list()
+
+        for i in range(self.floor_list.count()):
+            if self.floor_list.item(i).data(Qt.ItemDataRole.UserRole) == orig_idx:
+                self.floor_list.setCurrentRow(i)
+                break
+
+    def _on_ok(self):
+        if not self.project_name_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请输入项目名称")
+            return
+        if not self.output_dir_edit.text().strip():
+            QMessageBox.warning(self, "提示", "请选择输出目录")
+            return
+        if not self._floors:
+            QMessageBox.warning(self, "提示", "请至少添加一个楼层")
+            return
+        self.accept()
+
+    def get_project_name(self):
+        return self.project_name_edit.text().strip()
+
+    def get_output_dir(self):
+        return self.output_dir_edit.text().strip()
+
+    def get_floors(self):
+        return list(self._floors)
+
+class FloorManagerDialog(QDialog):
+    """楼层管理对话框 - 管理已打开项目的楼层（增删改、排序、更换平面图）
+
+    与 NewProjectDialog 的区别：
+    - 作用于已存在的 project_data.floors
+    - 保存后写回 project.json 并刷新主界面
+    - 删除楼层时同步删除平面图文件
+    """
+
+    def __init__(self, project_data, project_dir, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🏢 楼层管理")
+        self.resize(820, 720)
+        self.project_data = project_data
+        self.project_dir = project_dir
+        self.parent_manager = parent
+
+        self._floors = []
+        self._deleted_floor_ids = []
+        self._auto_sort_reverse = False
+
+        self._load_floors_from_project()
+        self._init_ui()
+        self._refresh_floor_list()
+
+    # ------------------------------------------------------------------
+    # 加载 / 保存
+    # ------------------------------------------------------------------
+    def _load_floors_from_project(self):
+        """从 project_data 加载楼层到内部副本"""
+        self._floors = []
+        for floor in self.project_data.floors:
+            floor_id = floor['id']
+            plan_path = ''
+            for ext in ['.jpg', '.jpeg', '.png']:
+                p = os.path.join(self.project_dir, f"floorplan_{floor_id}{ext}")
+                if os.path.exists(p):
+                    plan_path = p
+                    break
+
+            self._floors.append({
+                'id': floor_id,
+                'name': floor.get('name', '未命名'),
+                'order': floor.get('order', 0),
+                'hasPlan': floor.get('hasPlan', False),
+                'markers': floor.get('markers', []),
+                'plan_path': plan_path,
+                'original_plan_path': plan_path,
+                'is_new': False,
+            })
+
+    def _on_save(self):
+        """保存楼层变更到 project_data 并写盘"""
+        # 1. 删除平面图文件
+        for fid in self._deleted_floor_ids:
+            for ext in ['.jpg', '.jpeg', '.png']:
+                p = os.path.join(self.project_dir, f"floorplan_{fid}{ext}")
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+
+        # 2. 构建新的楼层数据
+        new_floors_data = []
+        for f in self._floors:
+            floor_data = {
+                'id': f['id'],
+                'name': f['name'],
+                'order': f['order'],
+                'hasPlan': False,
+                'markers': f.get('markers', []),
+            }
+
+            plan_path = f.get('plan_path', '')
+            if plan_path and os.path.exists(plan_path):
+                dst = os.path.join(self.project_dir, f"floorplan_{f['id']}.jpg")
+                needs_copy = f.get('is_new') or (plan_path != f.get('original_plan_path'))
+
+                if needs_copy:
+                    try:
+                        img = Image.open(plan_path)
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img.save(dst, 'JPEG', quality=92)
+                        floor_data['hasPlan'] = True
+                        # 清理旧格式的平面图
+                        for ext in ['.jpeg', '.png']:
+                            old = os.path.join(self.project_dir, f"floorplan_{f['id']}{ext}")
+                            if os.path.exists(old):
+                                try:
+                                    os.remove(old)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        print(f"[楼层管理] 平面图转换失败: {e}")
+                        ext = os.path.splitext(plan_path)[1].lower()
+                        if ext in ('.jpg', '.jpeg'):
+                            try:
+                                shutil.copy2(plan_path, dst)
+                                floor_data['hasPlan'] = True
+                            except Exception:
+                                pass
+                else:
+                    floor_data['hasPlan'] = True
+            elif f.get('hasPlan') and not f.get('is_new'):
+                floor_data['hasPlan'] = True
+
+            new_floors_data.append(floor_data)
+
+        # 3. 写回 project_data
+        old_current_floor = self.parent_manager.current_floor_id
+        self.project_data.floors = new_floors_data
+
+        # 如果当前楼层被删除，切换到第一个
+        valid_ids = {f['id'] for f in new_floors_data}
+        if old_current_floor not in valid_ids:
+            if new_floors_data:
+                self.parent_manager.current_floor_id = new_floors_data[0]['id']
+            else:
+                self.parent_manager.current_floor_id = None
+
+        # 4. 保存并刷新
+        self.parent_manager._save_project()
+        self.parent_manager._create_floor_tabs()
+        if self.parent_manager.current_floor_id:
+            self.parent_manager._load_floor(self.parent_manager.current_floor_id)
+            self.parent_manager._update_floor_tab_selection(self.parent_manager.current_floor_id)
+        self.parent_manager._update_marker_count()
+        self.parent_manager._refresh_linked_photos_list()
+
+        self.accept()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
+    def _btn_style(self, bg, hover):
+        return f"""
+            QPushButton {{
+                padding: 6px 12px; background-color: {bg}; color: white;
+                border: none; border-radius: 6px; font-size: 12px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background-color: {hover}; }}
+        """
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # 提示
+        hint = QLabel(f"💡 管理项目「{self.project_data.projectName}」的所有楼层")
+        hint.setStyleSheet("color: #8E8E93; font-size: 12px; padding-bottom: 4px;")
+        layout.addWidget(hint)
+
+        # 楼层列表
+        floor_group = QGroupBox("楼层列表（双击可编辑）")
+        floor_layout = QVBoxLayout(floor_group)
+
+        # 快速添加
+        quick_row = QHBoxLayout()
+        quick_label = QLabel("⚡ 快速添加:")
+        quick_label.setStyleSheet("font-size: 12px; color: #8E8E93; font-weight: 600;")
+        quick_row.addWidget(quick_label)
+
+        btn_add1 = QPushButton("+1层")
+        btn_add1.setStyleSheet(self._btn_style("#34C759", "#248A3D"))
+        btn_add1.clicked.connect(lambda: self._quick_add_floors(1))
+        quick_row.addWidget(btn_add1)
+
+        btn_add5 = QPushButton("+5层")
+        btn_add5.setStyleSheet(self._btn_style("#0A84FF", "#0056CC"))
+        btn_add5.clicked.connect(lambda: self._quick_add_floors(5))
+        quick_row.addWidget(btn_add5)
+
+        btn_basement = QPushButton("+B1")
+        btn_basement.setStyleSheet(self._btn_style("#FF9500", "#B36800"))
+        btn_basement.clicked.connect(self._quick_add_basement)
+        quick_row.addWidget(btn_basement)
+
+        btn_roof = QPushButton("+RF")
+        btn_roof.setStyleSheet(self._btn_style("#FF3B30", "#B32418"))
+        btn_roof.clicked.connect(self._quick_add_roof)
+        quick_row.addWidget(btn_roof)
+
+        btn_custom = QPushButton("自定义")
+        btn_custom.setStyleSheet(self._btn_style("#5856D6", "#3F3EA8"))
+        btn_custom.clicked.connect(self._quick_add_custom)
+        btn_batch = QPushButton("📚 批量平面")
+        btn_batch.setToolTip("批量导入平面图，自动从文件名识别楼层名\n支持 JPG/PNG/BMP/WEBP/TIFF/PDF")
+        btn_batch.setStyleSheet(self._btn_style("#00BCD4", "#00838F"))
+        btn_batch.clicked.connect(self._batch_import_plans)
+        quick_row.addWidget(btn_batch)
+        quick_row.addWidget(btn_custom)
+
+        quick_row.addStretch()
+        floor_layout.addLayout(quick_row)
+
+        # 列表
+        self.floor_list = QListWidget()
+        self.floor_list.setMinimumHeight(260)
+        self.floor_list.setAlternatingRowColors(True)
+        self.floor_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #D1D1D6;
+                border-radius: 6px;
+                background-color: #F9F9F9;
+            }
+            QListWidget::item { padding: 8px; border-bottom: 1px solid #EEE; }
+            QListWidget::item:alternate { background-color: #FFFFFF; }
+            QListWidget::item:selected { background-color: #007AFF; color: white; }
+        """)
+        self.floor_list.itemDoubleClicked.connect(lambda _: self._edit_floor())
+        floor_layout.addWidget(self.floor_list)
+
+        # 编辑按钮行
+        edit_row = QHBoxLayout()
+
+        edit_btn = QPushButton("✏️ 编辑")
+        edit_btn.clicked.connect(self._edit_floor)
+        edit_row.addWidget(edit_btn)
+
+        del_btn = QPushButton("🗑️ 删除")
+        del_btn.setStyleSheet(self._btn_style("#FF3B30", "#B32418"))
+        del_btn.clicked.connect(self._delete_floor)
+        edit_row.addWidget(del_btn)
+
+        edit_row.addSpacing(20)
+
+        up_btn = QPushButton("⬆️ 上移")
+        up_btn.clicked.connect(lambda: self._move_floor(-1))
+        edit_row.addWidget(up_btn)
+
+        down_btn = QPushButton("⬇️ 下移")
+        down_btn.clicked.connect(lambda: self._move_floor(1))
+        edit_row.addWidget(down_btn)
+
+        edit_row.addSpacing(20)
+
+        sort_btn = QPushButton("🔃 自动排序")
+        sort_btn.setStyleSheet(self._btn_style("#5856D6", "#3F3EA8"))
+        sort_btn.clicked.connect(self._auto_sort_floors)
+        edit_row.addWidget(sort_btn)
+
+        edit_row.addStretch()
+        floor_layout.addLayout(edit_row)
+
+        layout.addWidget(floor_group)
+
+        # 底部按钮
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+
+        save_btn = QPushButton("💾 保存并应用")
+        save_btn.setStyleSheet("""
+            QPushButton {
+                padding: 8px 28px; font-size: 13px;
+                background-color: #34C759; color: white;
+                border: none; border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #248A3D; }
+        """)
+        save_btn.clicked.connect(self._on_save)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.clicked.connect(self.reject)
+
+        bottom.addWidget(save_btn)
+        bottom.addWidget(cancel_btn)
+        layout.addLayout(bottom)
+
+    # ------------------------------------------------------------------
+    # 名称工具
+    # ------------------------------------------------------------------
+    def _existing_names(self, exclude_id=None):
+        return {f['name'] for f in self._floors if f['id'] != exclude_id}
+
+    def _next_floor_name(self):
+        max_num = 0
+        for f in self._floors:
+            m = re.match(r'^(\d+)F$', f['name'], re.IGNORECASE)
+            if m:
+                n = int(m.group(1))
+                if n > max_num:
+                    max_num = n
+        return f"{max_num + 1}F" if max_num > 0 else "1F"
+
+    def _make_unique(self, base_name):
+        existing = {f['name'] for f in self._floors}
+        if base_name not in existing:
+            return base_name
+        suffix = 1
+        while f"{base_name}_{suffix}" in existing:
+            suffix += 1
+        return f"{base_name}_{suffix}"
+
+    def _gen_floor_id(self):
+        return f"floor_{int(datetime.now().timestamp() * 1000)}_{len(self._floors)}"
+
+    def _add_floor_with_name(self, name):
+        max_order = max([f['order'] for f in self._floors], default=-1)
+        self._floors.append({
+            'id': self._gen_floor_id(),
+            'name': name,
+            'order': max_order + 1,
+            'hasPlan': False,
+            'markers': [],
+            'plan_path': '',
+            'original_plan_path': '',
+            'is_new': True,
+        })
+
+    # ------------------------------------------------------------------
+    # 快速添加
+    # ------------------------------------------------------------------
+    def _quick_add_floors(self, count):
+        for _ in range(count):
+            name = self._next_floor_name()
+            name = self._make_unique(name)
+            self._add_floor_with_name(name)
+        self._refresh_floor_list()
+
+    def _quick_add_basement(self):
+        max_b = 0
+        for f in self._floors:
+            m = re.match(r'^B(\d+)$', f['name'], re.IGNORECASE)
+            if m:
+                max_b = max(max_b, int(m.group(1)))
+        name = self._make_unique(f"B{max_b + 1}")
+        self._add_floor_with_name(name)
+        self._refresh_floor_list()
+
+    def _quick_add_roof(self):
+        candidates = ['RF', '屋顶层', '阁楼层', 'R层']
+        existing = {f['name'] for f in self._floors}
+        name = None
+        for c in candidates:
+            if c not in existing:
+                name = c
+                break
+        if not name:
+            name = self._make_unique('RF')
+        self._add_floor_with_name(name)
+        self._refresh_floor_list()
+
+    def _quick_add_custom(self):
+        name, ok = QInputDialog.getText(self, "自定义楼层", "请输入楼层名称：", text="")
+        if ok and name.strip():
+            name = self._make_unique(name.strip())
+            self._add_floor_with_name(name)
+            self._refresh_floor_list()
+
+    def _batch_import_plans(self):
+        """批量导入平面图，自动从文件名识别楼层名"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "选择平面图文件（可多选）", "",
+            "平面图 (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff *.pdf);;"
+            "图片 (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff);;"
+            "PDF (*.pdf);;所有文件 (*.*)"
+        )
+        if not files:
+            return
+
+        success = 0
+        skipped = 0
+        failed = 0
+        failed_files = []
+        skipped_files = []
+        existing_names = {f['name'] for f in self._floors}
+
+        # 临时目录存放 PDF 转换后的图片
+        temp_dir = os.path.join(tempfile.gettempdir(), "suixi_batch_plans")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        for file_path in files:
+            filename = os.path.basename(file_path)
+            ext = os.path.splitext(file_path)[1].lower()
+
+            floor_name = self._extract_floor_name_from_file(filename)
+            if not floor_name:
+                floor_name = os.path.splitext(filename)[0][:20] or "未命名"
+
+            if floor_name in existing_names:
+                skipped += 1
+                skipped_files.append(f"{filename} → {floor_name}")
+                continue
+
+            final_path = file_path
+
+            if ext == '.pdf':
+                try:
+                    img = self._pdf_to_pil(file_path)
+                    if img is None:
+                        failed += 1
+                        failed_files.append(f"{filename}（PDF 转换失败，请安装 PyMuPDF/pdf2image/pypdfium2）")
+                        continue
+                    tmp_jpg = os.path.join(
+                        temp_dir,
+                        f"{int(datetime.now().timestamp() * 1000)}_{success}.jpg"
+                    )
+                    img.save(tmp_jpg, 'JPEG', quality=92)
+                    final_path = tmp_jpg
+                except Exception as e:
+                    failed += 1
+                    failed_files.append(f"{filename}（{e}）")
+                    continue
+            else:
+                # 验证图片可读
+                try:
+                    test_img = Image.open(file_path)
+                    test_img.verify()
+                except Exception as e:
+                    failed += 1
+                    failed_files.append(f"{filename}（图片无效：{e}）")
+                    continue
+
+            # ===== 关键：为楼层补全所有必要字段，避免保存时 KeyError =====
+            new_floor_id = self._gen_floor_id()
+            max_order = max([f['order'] for f in self._floors], default=-1)
+            self._floors.append({
+                'id': new_floor_id,                        # ✅ 必须有 id
+                'name': floor_name,
+                'order': max_order + 1,
+                'hasPlan': True,                           # ✅ 标记有平面图
+                'markers': [],                             # ✅ 空点位列表
+                'plan_path': final_path,
+                'original_plan_path': final_path,
+                'is_new': True,                            # ✅ 标记为新楼层
+            })
+            existing_names.add(floor_name)
+            success += 1
+
+        self._refresh_floor_list()
+        self._show_batch_report(success, skipped, failed, skipped_files, failed_files)
+
+    @staticmethod
+    def _extract_floor_name_from_file(filename):
+        """从文件名提取楼层名（与 FloorEditDialog 中的逻辑一致）"""
+        name = os.path.splitext(filename)[0]
+
+        m = re.match(r'^(\d+)\s*[Ff层楼]', name)
+        if m:
+            return m.group(1) + 'F'
+
+        m = re.match(r'^([Bb][\d]+)', name)
+        if m:
+            return m.group(1).upper()
+
+        m = re.match(r'^-(\d+)[Ff]', name)
+        if m:
+            return f"B{m.group(1)}"
+
+        m = re.match(r'^(负|地下)([一二三四五六七八九十\d]+)[层楼]?', name)
+        if m:
+            cn_num_map = {'一': '1', '二': '2', '三': '3', '四': '4', '五': '5',
+                          '六': '6', '七': '7', '八': '8', '九': '9', '十': '10'}
+            num_str = m.group(2)
+            num = cn_num_map.get(num_str, num_str)
+            return f"B{num}"
+
+        if re.search(r'([Rr][Ff]|屋顶|顶层|屋面)', name):
+            return 'RF'
+
+        return None
+
+    @staticmethod
+    def _pdf_to_pil(pdf_path, dpi=150):
+        """PDF 首页转 PIL Image"""
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            page = doc[0]
+            zoom = dpi / 72
+            mat = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            doc.close()
+            return img
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[PDF] PyMuPDF 处理失败: {e}")
+
+        try:
+            from pdf2image import convert_from_path
+            images = convert_from_path(pdf_path, dpi=dpi, first_page=1, last_page=1)
+            if images:
+                return images[0]
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[PDF] pdf2image 处理失败: {e}")
+
+        try:
+            import pypdfium2 as pdfium
+            pdf = pdfium.PdfDocument(pdf_path)
+            page = pdf[0]
+            bitmap = page.render(scale=dpi / 72)
+            pil_image = bitmap.to_pil()
+            pdf.close()
+            return pil_image
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[PDF] pypdfium2 处理失败: {e}")
+
+        return None
+
+    def _show_batch_report(self, success, skipped, failed, skipped_files, failed_files):
+        """统一显示批量导入报告"""
+        msg_lines = [f"✅ 成功导入 {success} 个楼层"]
+        if skipped > 0:
+            msg_lines.append(f"\n⏭️ 跳过 {skipped} 个（名称重复）：")
+            msg_lines.extend(f"  • {s}" for s in skipped_files[:5])
+            if len(skipped_files) > 5:
+                msg_lines.append(f"  • ...还有 {len(skipped_files) - 5} 个")
+        if failed > 0:
+            msg_lines.append(f"\n❌ 失败 {failed} 个：")
+            msg_lines.extend(f"  • {s}" for s in failed_files[:5])
+            if len(failed_files) > 5:
+                msg_lines.append(f"  • ...还有 {len(failed_files) - 5} 个")
+        QMessageBox.information(self, "批量导入完成", "\n".join(msg_lines))
+
+    # ------------------------------------------------------------------
+    # 自动排序
+    # ------------------------------------------------------------------
+    def _auto_sort_floors(self):
+        roof, normal, base, other = [], [], [], []
+        for f in self._floors:
+            n = f['name'].upper()
+            if n == 'RF' or '屋顶' in f['name'] or '顶层' in f['name']:
+                roof.append(f)
+            elif re.match(r'^B\d+$', n):
+                base.append(f)
+            elif re.match(r'^\d+F$', n):
+                normal.append(f)
+            else:
+                other.append(f)
+
+        if self._auto_sort_reverse:
+            normal.sort(key=lambda x: int(re.match(r'^(\d+)', x['name']).group(1)))
+            base.sort(key=lambda x: -int(x['name'][1:]))
+            sorted_floors = base + other + normal + roof
+            msg = "✅ 已自动排序（逆序：深→高）"
+        else:
+            normal.sort(key=lambda x: -int(re.match(r'^(\d+)', x['name']).group(1)))
+            base.sort(key=lambda x: int(x['name'][1:]))
+            sorted_floors = roof + normal + other + base
+            msg = "✅ 已自动排序（正序：高→深）"
+
+        self._auto_sort_reverse = not self._auto_sort_reverse
+        n = len(sorted_floors)
+        for i, f in enumerate(sorted_floors):
+            f['order'] = n - i
+
+        self._refresh_floor_list()
+        QMessageBox.information(self, "自动排序", msg)
+
+    # ------------------------------------------------------------------
+    # 基础操作
+    # ------------------------------------------------------------------
+    def _refresh_floor_list(self):
+        self.floor_list.clear()
+        sorted_pairs = sorted(
+            enumerate(self._floors),
+            key=lambda x: (-x[1]['order'], x[0])
+        )
+        for orig_idx, f in sorted_pairs:
+            plan_path = f.get('plan_path', '')
+            if plan_path and os.path.exists(plan_path):
+                plan_info = f"📷 {os.path.basename(plan_path)}"
+            elif f.get('hasPlan'):
+                plan_info = "⚠️ 平面图缺失"
+            else:
+                plan_info = "⚠️ 无平面图"
+            marker_count = len(f.get('markers', []))
+            new_tag = " [新]" if f.get('is_new') else ""
+            text = f"[序号 {f['order']}]  {f['name']}{new_tag}   —   {plan_info}  ({marker_count} 个点位)"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, orig_idx)
+            self.floor_list.addItem(item)
+
+    def _edit_floor(self):
+        item = self.floor_list.currentItem()
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        f = self._floors[orig_idx]
+        # 复用 FloorEditDialog，传入 plan_path 字段
+        floor_data = {
+            'name': f['name'],
+            'order': f['order'],
+            'plan_path': f.get('plan_path', ''),
+        }
+        dialog = FloorEditDialog(
+            self,
+            floor_data,
+            existing_names=self._existing_names(exclude_id=f['id'])
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_data = dialog.get_data()
+            # 如果平面图有变化，标记
+            new_plan = new_data.get('plan_path', '')
+            if new_plan != f.get('plan_path', ''):
+                f['plan_path'] = new_plan
+                f['is_new'] = True if not f.get('is_new') else f['is_new']
+                # 若原为已保存的楼层且换了平面图，也需要重新写盘
+                if not f.get('is_new'):
+                    f['is_new'] = True
+            f['name'] = new_data['name']
+            f['order'] = new_data['order']
+            self._refresh_floor_list()
+
+    def _delete_floor(self):
+        item = self.floor_list.currentItem()
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        f = self._floors[orig_idx]
+        marker_count = len(f.get('markers', []))
+        extra = f"\n该楼层有 {marker_count} 个采集点位，将一并删除！" if marker_count > 0 else ""
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定删除楼层「{f['name']}」吗？{extra}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            if not f.get('is_new'):
+                self._deleted_floor_ids.append(f['id'])
+            self._floors.pop(orig_idx)
+            self._refresh_floor_list()
+
+    def _move_floor(self, direction):
+        item = self.floor_list.currentItem()
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+
+        sorted_indices = sorted(
+            range(len(self._floors)),
+            key=lambda i: (-self._floors[i]['order'], i)
+        )
+        current_pos = sorted_indices.index(orig_idx)
+        target_pos = current_pos + direction
+        if target_pos < 0 or target_pos >= len(sorted_indices):
+            return
+
+        sorted_indices[current_pos], sorted_indices[target_pos] = \
+            sorted_indices[target_pos], sorted_indices[current_pos]
+
+        n = len(sorted_indices)
+        for pos, idx in enumerate(sorted_indices):
+            self._floors[idx]['order'] = n - pos
+
+        self._refresh_floor_list()
+
+        for i in range(self.floor_list.count()):
+            if self.floor_list.item(i).data(Qt.ItemDataRole.UserRole) == orig_idx:
+                self.floor_list.setCurrentRow(i)
+                break
 
 class MergeProjectsDialog(QDialog):
     """合并项目对话框 - 支持拖拽文件夹/ZIP 到列表中"""
@@ -3620,11 +5102,41 @@ class PanoramaManager(QMainWindow):
         floor_tabs_layout.setSpacing(8)
         left_layout.addWidget(self.floor_tabs_widget)
         
-        # 平面图标题
+        # ===== 平面图标题行（含楼层管理入口） =====
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(10, 10, 10, 0)
+        header_row.setSpacing(8)
+
         floorplan_header = QLabel("📍 平面图")
-        floorplan_header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 10px;")
-        left_layout.addWidget(floorplan_header)
-        
+        floorplan_header.setStyleSheet("font-size: 16px; font-weight: bold;")
+        header_row.addWidget(floorplan_header)
+
+        header_row.addStretch()
+
+        # 楼层管理入口（就在楼层标签行的上方）
+        self.floor_manager_btn = QPushButton("🏢 楼层管理")
+        self.floor_manager_btn.setToolTip("增删改楼层、更换平面图、调整楼层顺序")
+        self.floor_manager_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.floor_manager_btn.setStyleSheet("""
+            QPushButton {
+                padding: 5px 14px;
+                font-size: 12px;
+                background-color: #5856D6;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background-color: #3F3EA8; }
+            QPushButton:pressed { background-color: #2E2D7A; }
+            QPushButton:disabled { background-color: #CCC; color: #888; }
+        """)
+        self.floor_manager_btn.setEnabled(False)
+        self.floor_manager_btn.clicked.connect(self._open_floor_manager)
+        header_row.addWidget(self.floor_manager_btn)
+
+        left_layout.addLayout(header_row)
+
         # 楼层标签区域（动态创建，支持滚动）
         self.floor_tabs_scroll = QScrollArea()
         self.floor_tabs_scroll.setWidgetResizable(True)
@@ -4741,7 +6253,14 @@ class PanoramaManager(QMainWindow):
         
         # 文件菜单
         file_menu = menubar.addMenu("文件(&F)")
-        
+       
+        # 新建项目
+        new_project_action = QAction("新建项目(&N)...", self)
+        new_project_action.setShortcut("Ctrl+N")
+        new_project_action.triggered.connect(self._new_project)
+        file_menu.addAction(new_project_action)
+        file_menu.addSeparator()
+ 
         import_folder_action = QAction("从文件夹导入(&F)...", self)
         import_folder_action.setShortcut("Ctrl+I")
         import_folder_action.triggered.connect(self.import_from_folder)
@@ -4811,6 +6330,11 @@ class PanoramaManager(QMainWindow):
 
         tools_menu.addSeparator()
         
+        floor_manager_action = QAction("🏢 楼层管理(&L)...", self)
+        floor_manager_action.setToolTip("增删改楼层、更换平面图、调整楼层顺序")
+        floor_manager_action.triggered.connect(self._open_floor_manager)
+        tools_menu.addAction(floor_manager_action)
+
         photo_relation_action = QAction("调整照片关联关系(&R)...", self)
         photo_relation_action.setToolTip("单点互换、批量重排、跨楼层互换已关联的照片")
         photo_relation_action.triggered.connect(self._open_photo_relation_manager)
@@ -4890,6 +6414,112 @@ class PanoramaManager(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导入失败: {str(e)}")
+
+    def _new_project(self):
+        """新建项目 - 手动管理楼层与平面图"""
+        dialog = NewProjectDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        project_name = dialog.get_project_name()
+        output_dir = dialog.get_output_dir()
+        floors = dialog.get_floors()
+
+        try:
+            # 创建项目目录（自动去重）
+            safe_name = "".join(
+                c for c in project_name
+                if c.isalnum() or c in (' ', '-', '_', '(', ')', '（', '）')
+            ).strip()
+            if not safe_name:
+                safe_name = "新建项目"
+
+            project_dir = os.path.join(output_dir, safe_name)
+            counter = 1
+            orig_dir = project_dir
+            while os.path.exists(project_dir):
+                project_dir = f"{orig_dir}_{counter}"
+                counter += 1
+            os.makedirs(project_dir, exist_ok=True)
+
+            # ===== 初始化照片目录 =====
+            photos_dir = os.path.join(project_dir, 'photos')
+            os.makedirs(photos_dir, exist_ok=True)
+            print(f"[新建项目] 照片目录已创建: {photos_dir}")
+
+            # 构建楼层数据并复制/转换平面图
+            floors_data = []
+            base_ts = int(datetime.now().timestamp() * 1000)
+
+            for idx, f in enumerate(floors):
+                floor_id = f"floor_{base_ts}_{idx}"
+                floor_data = {
+                    'id': floor_id,
+                    'name': f['name'],
+                    'order': f['order'],
+                    'hasPlan': False,
+                    'markers': []
+                }
+
+                plan_path = f.get('plan_path', '')
+                if plan_path and os.path.exists(plan_path):
+                    dst = os.path.join(project_dir, f"floorplan_{floor_id}.jpg")
+                    try:
+                        # 统一转为 JPG，保证查看器/管理器都能识别
+                        img = Image.open(plan_path)
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img.save(dst, 'JPEG', quality=92)
+                        floor_data['hasPlan'] = True
+                        print(f"[新建项目] 平面图已导入: {f['name']} -> {os.path.basename(dst)}")
+                    except Exception as e:
+                        print(f"[警告] 转换平面图失败 {plan_path}: {e}")
+                        # 回退：直接复制 jpg/jpeg
+                        ext = os.path.splitext(plan_path)[1].lower()
+                        if ext in ('.jpg', '.jpeg'):
+                            try:
+                                shutil.copy2(plan_path, dst)
+                                floor_data['hasPlan'] = True
+                            except Exception as e2:
+                                print(f"[错误] 复制平面图失败: {e2}")
+
+                floors_data.append(floor_data)
+
+            # 写入 project.json
+            now = datetime.now().isoformat()
+            project_dict = {
+                'schemaVersion': '4.0',
+                'projectName': project_name,
+                'createdAt': now,
+                'updatedAt': now,
+                'timeOffset': 0,
+                'calibrated': False,
+                'photoBaseDir': photos_dir,
+                'floors': floors_data
+            }
+
+            project_json_path = os.path.join(project_dir, 'project.json')
+            with open(project_json_path, 'w', encoding='utf-8') as f:
+                json.dump(project_dict, f, ensure_ascii=False, indent=2)
+
+            # 加载项目（_load_project 内部会弹成功提示）
+            self.project_dir = project_dir
+            self._load_project(project_json_path)
+            self._add_to_history(self.project_dir, self.project_data.projectName)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "创建失败", f"新建项目时出错:\n{e}")
+
+    def _open_floor_manager(self):
+        """打开楼层管理对话框 - 对已打开的项目进行楼层增删改"""
+        if not self.project_data or not self.project_dir:
+            QMessageBox.warning(self, "提示", "请先打开项目")
+            return
+        self._push_history()
+        dialog = FloorManagerDialog(self.project_data, self.project_dir, self)
+        dialog.exec()
     
     def import_from_folder(self):
         """从文件夹导入项目 - 自动识别ZIP和照片文件夹（适配手机本机拍摄）
@@ -5444,6 +7074,7 @@ class PanoramaManager(QMainWindow):
             self.export_project_btn.setEnabled(True)
             self.export_standalone_btn.setEnabled(True)
             self.calibration_edit_btn.setEnabled(True)
+            self.floor_manager_btn.setEnabled(True) 
             
             QMessageBox.information(self, "成功", 
                 f"项目 '{self.project_data.projectName}' 加载成功\n"
@@ -6192,7 +7823,7 @@ class PanoramaManager(QMainWindow):
             self._update_floating_toolbar()
     
     def _create_floor_tabs(self):
-        """创建楼层切换标签"""
+        """创建楼层切换标签（含 + 按钮和右键菜单）"""
         # 清除旧标签
         while self.floor_tabs_layout.count():
             item = self.floor_tabs_layout.takeAt(0)
@@ -6209,7 +7840,15 @@ class PanoramaManager(QMainWindow):
             btn = QPushButton(floor_data['name'])
             btn.setCheckable(True)
             btn.setProperty('floor_id', floor_data['id'])
+            btn.setToolTip(f"左键切换，右键管理（{floor_data['name']}）")
             btn.clicked.connect(lambda checked, fid=floor_data['id']: self._on_floor_tab_clicked(fid))
+            
+            # ---- 启用右键菜单 ----
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, fid=floor_data['id'], b=btn:
+                    self._on_floor_tab_context_menu(fid, b.mapToGlobal(pos))
+            )
             
             # 设置样式
             btn.setStyleSheet("""
@@ -6232,8 +7871,334 @@ class PanoramaManager(QMainWindow):
             
             self.floor_tabs_layout.addWidget(btn)
         
+        # ---- 新增：楼层标签末尾的「+」按钮 ----
+        add_tab_btn = QPushButton("+")
+        add_tab_btn.setToolTip("添加新楼层")
+        add_tab_btn.setFixedSize(32, 32)
+        add_tab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_tab_btn.clicked.connect(self._add_floor_from_tabs)
+        add_tab_btn.setStyleSheet("""
+            QPushButton {
+                padding: 0;
+                background-color: #34C759;
+                color: white;
+                border: none;
+                border-radius: 16px;
+                font-size: 20px;
+                font-weight: bold;
+                line-height: 1;
+            }
+            QPushButton:hover { background-color: #248A3D; }
+            QPushButton:pressed { background-color: #1B6B2E; }
+        """)
+        self.floor_tabs_layout.addWidget(add_tab_btn)
+        
         self.floor_tabs_layout.addStretch()
+
+    def _add_floor_from_tabs(self):
+        """从楼层标签栏的「+」按钮添加新楼层"""
+        if not self.project_data or not self.project_dir:
+            QMessageBox.warning(self, "提示", "请先创建或打开项目")
+            return
+        
+        # 计算下一个默认楼层名
+        max_num = 0
+        for f in self.project_data.floors:
+            m = re.match(r'^(\d+)F$', f.get('name', ''), re.IGNORECASE)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+        default_name = f"{max_num + 1}F" if max_num > 0 else "1F"
+        
+        existing_names = {f.get('name', '') for f in self.project_data.floors}
+        default_order = max(
+            [f.get('order', 0) for f in self.project_data.floors],
+            default=-1
+        ) + 1
+        
+        # 复用 FloorEditDialog
+        dialog = FloorEditDialog(
+            self,
+            {'name': default_name, 'order': default_order, 'plan_path': ''},
+            existing_names=existing_names
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        
+        data = dialog.get_data()
+        self._push_history()
+        
+        # 生成新楼层ID
+        new_floor_id = f"floor_{int(datetime.now().timestamp() * 1000)}"
+        
+        new_floor = {
+            'id': new_floor_id,
+            'name': data['name'],
+            'order': data['order'],
+            'hasPlan': False,
+            'markers': []
+        }
+        
+        # 处理平面图
+        plan_path = data.get('plan_path', '')
+        if plan_path and os.path.exists(plan_path):
+            dst = os.path.join(self.project_dir, f"floorplan_{new_floor_id}.jpg")
+            try:
+                img = Image.open(plan_path)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                img.save(dst, 'JPEG', quality=92)
+                new_floor['hasPlan'] = True
+            except Exception as e:
+                print(f"[警告] 转换平面图失败: {e}")
+                ext = os.path.splitext(plan_path)[1].lower()
+                if ext in ('.jpg', '.jpeg'):
+                    try:
+                        shutil.copy2(plan_path, dst)
+                        new_floor['hasPlan'] = True
+                    except Exception as e2:
+                        print(f"[错误] 复制平面图失败: {e2}")
+        
+        self.project_data.floors.append(new_floor)
+        self._save_project()
+        self._create_floor_tabs()
+        self._update_marker_count()
+        self._refresh_linked_photos_list()
+        
+        # 自动切换到新楼层
+        self._on_floor_tab_clicked(new_floor_id)
+        
+        QMessageBox.information(
+            self, "已添加",
+            f"已添加楼层「{data['name']}」"
+        )
     
+    def _on_floor_tab_context_menu(self, floor_id: str, global_pos):
+        """楼层标签右键菜单"""
+        if not self.project_data:
+            return
+        
+        # 查找楼层
+        floor_data = None
+        for f in self.project_data.floors:
+            if f['id'] == floor_id:
+                floor_data = f
+                break
+        if not floor_data:
+            return
+        
+        menu = QMenu(self)
+        
+        # 标题（不可点击）
+        title_action = QAction(f"楼层：{floor_data['name']}", self)
+        title_action.setEnabled(False)
+        menu.addAction(title_action)
+        menu.addSeparator()
+        
+        rename_action = QAction("✏️ 修改楼层名称", self)
+        replace_plan_action = QAction("📷 替换平面图", self)
+        plan_status = "已导入" if floor_data.get('hasPlan') else "未导入"
+        replace_plan_action.setText(f"📷 替换平面图（当前：{plan_status}）")
+        
+        menu.addAction(rename_action)
+        menu.addAction(replace_plan_action)
+        menu.addSeparator()
+        
+        delete_action = QAction("🗑️ 删除此楼层", self)
+        delete_action.setIcon(QIcon())
+        menu.addAction(delete_action)
+        
+        # 连接信号
+        rename_action.triggered.connect(lambda: self._rename_floor_from_tabs(floor_id))
+        replace_plan_action.triggered.connect(lambda: self._replace_floor_plan_from_tabs(floor_id))
+        delete_action.triggered.connect(lambda: self._delete_floor_from_tabs(floor_id))
+        
+        menu.exec(global_pos)
+    
+    def _rename_floor_from_tabs(self, floor_id: str):
+        """重命名楼层（从标签右键菜单触发）"""
+        floor_data = None
+        for f in self.project_data.floors:
+            if f['id'] == floor_id:
+                floor_data = f
+                break
+        if not floor_data:
+            return
+        
+        new_name, ok = QInputDialog.getText(
+            self, "重命名楼层",
+            f"当前名称：{floor_data['name']}\n请输入新名称：",
+            text=floor_data['name']
+        )
+        if not ok or not new_name.strip():
+            return
+        
+        new_name = new_name.strip()
+        if new_name == floor_data['name']:
+            return
+        
+        # 重名检测
+        conflict = None
+        for f in self.project_data.floors:
+            if f['id'] != floor_id and f['name'] == new_name:
+                conflict = f
+                break
+        
+        if conflict:
+            reply = QMessageBox.question(
+                self, "名称冲突",
+                f"已存在名为「{new_name}」的楼层。\n\n是否自动加后缀（{new_name}_1）？\n"
+                f"（选择「否」将取消操作）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                suffix = 1
+                while any(f['name'] == f"{new_name}_{suffix}" for f in self.project_data.floors):
+                    suffix += 1
+                new_name = f"{new_name}_{suffix}"
+            else:
+                return
+        
+        self._push_history()
+        old_name = floor_data['name']
+        floor_data['name'] = new_name
+        self._save_project()
+        self._create_floor_tabs()
+        self._update_floor_tab_selection(floor_id)
+        
+        # 如果当前楼层就是这个，刷新显示
+        if self.current_floor_id == floor_id:
+            self._load_floor(floor_id)
+        
+        QMessageBox.information(
+            self, "已重命名",
+            f"楼层「{old_name}」已重命名为「{new_name}」"
+        )
+    
+    def _replace_floor_plan_from_tabs(self, floor_id: str):
+        """替换平面图（从标签右键菜单触发）"""
+        floor_data = None
+        for f in self.project_data.floors:
+            if f['id'] == floor_id:
+                floor_data = f
+                break
+        if not floor_data:
+            return
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, f"选择「{floor_data['name']}」的新平面图", "",
+            "图片文件 (*.jpg *.jpeg *.png *.bmp *.webp);;所有文件 (*.*)"
+        )
+        if not file_path:
+            return
+        
+        self._push_history()
+        
+        dst = os.path.join(self.project_dir, f"floorplan_{floor_id}.jpg")
+        try:
+            img = Image.open(file_path)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            img.save(dst, 'JPEG', quality=92)
+            floor_data['hasPlan'] = True
+            
+            # 清理旧格式文件
+            for ext in ['.jpeg', '.png']:
+                old = os.path.join(self.project_dir, f"floorplan_{floor_id}{ext}")
+                if os.path.exists(old):
+                    try:
+                        os.remove(old)
+                    except Exception:
+                        pass
+            
+            self._save_project()
+            self._create_floor_tabs()
+            self._update_floor_tab_selection(floor_id)
+            
+            # 如果是当前楼层，立即刷新显示
+            if self.current_floor_id == floor_id:
+                self._load_floor(floor_id)
+            
+            QMessageBox.information(
+                self, "已替换",
+                f"「{floor_data['name']}」的平面图已替换为：\n{os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "错误", f"替换平面图失败:\n{e}")
+    
+    def _delete_floor_from_tabs(self, floor_id: str):
+        """删除楼层（从标签右键菜单触发）"""
+        floor_data = None
+        for f in self.project_data.floors:
+            if f['id'] == floor_id:
+                floor_data = f
+                break
+        if not floor_data:
+            return
+        
+        marker_count = len(floor_data.get('markers', []))
+        linked_count = sum(1 for m in floor_data.get('markers', []) if m.get('status') == 'linked')
+        
+        extra_lines = []
+        if marker_count > 0:
+            extra_lines.append(f"⚠️ 该楼层有 {marker_count} 个采集点位，将一并删除！")
+        if linked_count > 0:
+            extra_lines.append(f"⚠️ 其中 {linked_count} 个点位已关联照片！")
+        extra = ("\n\n" + "\n".join(extra_lines)) if extra_lines else ""
+        
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定删除楼层「{floor_data['name']}」吗？{extra}\n\n此操作可通过 Ctrl+Z 撤销",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self._push_history()
+        
+        # 删除平面图文件
+        for ext in ['.jpg', '.jpeg', '.png']:
+            p = os.path.join(self.project_dir, f"floorplan_{floor_id}{ext}")
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception as e:
+                    print(f"[警告] 删除平面图失败: {e}")
+        
+        # 从 project_data 中移除
+        self.project_data.floors = [
+            f for f in self.project_data.floors if f['id'] != floor_id
+        ]
+        
+        # 如果删除的是当前楼层，切换到第一个
+        if self.current_floor_id == floor_id:
+            if self.project_data.floors:
+                # 按 order 排序取第一个
+                sorted_floors = sorted(
+                    self.project_data.floors,
+                    key=lambda f: f.get('order', 0),
+                    reverse=True
+                )
+                self.current_floor_id = sorted_floors[0]['id']
+            else:
+                self.current_floor_id = None
+        
+        self._save_project()
+        self._create_floor_tabs()
+        self._update_marker_count()
+        self._refresh_linked_photos_list()
+        
+        if self.current_floor_id:
+            self._load_floor(self.current_floor_id)
+            self._update_floor_tab_selection(self.current_floor_id)
+        
+        QMessageBox.information(
+            self, "已删除",
+            f"楼层「{floor_data['name']}」已删除\n\n"
+            f"如需恢复，请按 Ctrl+Z 撤销"
+        )
+
     def _on_floor_tab_clicked(self, floor_id: str):
         """楼层标签点击事件"""
         self._update_floor_tab_selection(floor_id)
@@ -10195,6 +12160,53 @@ function jumpToMarker(targetId) {
         # 重新生成 HTML
         self._generate_viewer_html(viewer_dir)
 
+    def _compress_image_for_mobile(self, source_path, max_size=1600, quality=82):
+        """压缩图片用于手机端导入
+        - 长边限制 max_size
+        - JPEG 质量 quality
+        - 自动处理 EXIF 旋转
+        - 返回压缩后的 bytes（JPEG 格式）；失败返回 None
+        """
+        try:
+            import io
+            from PIL import Image, ImageOps
+            img = Image.open(source_path)
+            # 处理 EXIF 旋转（手机竖拍照片需要）
+            try:
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            # 长边限制
+            w, h = img.size
+            if max(w, h) > max_size:
+                if w >= h:
+                    new_w = max_size
+                    new_h = max(1, int(h * max_size / w))
+                else:
+                    new_h = max_size
+                    new_w = max(1, int(w * max_size / h))
+                img = img.resize((new_w, new_h), Image.LANCZOS)
+            # 输出到内存
+            buf = io.BytesIO()
+            img.save(buf, 'JPEG', quality=quality, optimize=True, progressive=True)
+            result = buf.getvalue()
+            orig_size = os.path.getsize(source_path)
+            new_size = len(result)
+            ratio = new_size / orig_size * 100 if orig_size > 0 else 0
+            print(f"[导出压缩] {os.path.basename(source_path)}: "
+                  f"{orig_size//1024}KB → {new_size//1024}KB ({ratio:.0f}%)")
+            return result
+        except Exception as e:
+            print(f"[导出压缩] 失败 {source_path}: {e}")
+            # 回退：原样读取
+            try:
+                with open(source_path, 'rb') as f:
+                    return f.read()
+            except Exception:
+                return None
+
     def _export_for_capture(self):
         """导出为采集端可导入的数据包"""
         if not self.project_dir or not self.project_data:
@@ -10226,10 +12238,19 @@ function jumpToMarker(targetId) {
                     'markers': []
                 }
                 for m in floor_data.get('markers', []):
+                    # 计算实际照片文件名
+                    photo_name = m.get('cameraFileName', '')
+                    if not photo_name and m.get('panoramaPath'):
+                        # 从 panoramaPath 提取文件名
+                        p = m['panoramaPath']
+                        if p.startswith('external_photos/'):
+                            p = p[len('external_photos/'):]
+                        photo_name = os.path.basename(p)
+
                     floor_export['markers'].append({
                         'id': m['id'],
                         'status': m.get('status', 'pending'),
-                        'cameraFileName': m.get('cameraFileName', ''),
+                        'cameraFileName': photo_name,
                         'customName': m.get('customName', ''),
                         'x': m.get('x', 0),
                         'y': m.get('y', 0),
@@ -10237,7 +12258,8 @@ function jumpToMarker(targetId) {
                         'captureTime': m.get('captureTime', ''),
                         'startTime': m.get('startTime', ''),
                         'endTime': m.get('endTime', ''),
-                        'direction': m.get('direction', None)
+                        'direction': m.get('direction', None),
+                        'photoFile': photo_name,      # ← 手机端用这个字段匹配
                     })
                 export_data['floors'].append(floor_export)
 
@@ -10254,13 +12276,56 @@ function jumpToMarker(targetId) {
                         if os.path.exists(plan_path):
                             zf.write(plan_path, f"floorplan_{floor_data['id']}{os.path.splitext(plan_path)[1]}")
                 # 写入照片
-                photos_dir = os.path.join(self.project_dir, 'photos')
-                if os.path.exists(photos_dir):
-                    for root, dirs, files in os.walk(photos_dir):
+                # ===== 写入照片（压缩到手机端适配尺寸） =====
+                photo_base_dir = self._safe_photo_base_dir()
+                photos_to_pack = []
+                seen_names = set()
+
+                # 来源1：项目目录 photos/
+                src_photos = os.path.join(self.project_dir, 'photos')
+                if os.path.exists(src_photos):
+                    for root, dirs, files in os.walk(src_photos):
                         for f in files:
-                            full = os.path.join(root, f)
-                            arc = os.path.relpath(full, self.project_dir)
-                            zf.write(full, arc)
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                                full = os.path.join(root, f)
+                                key = os.path.basename(f).lower()
+                                if key not in seen_names:
+                                    seen_names.add(key)
+                                    photos_to_pack.append(full)
+
+                # 来源2：photoBaseDir（若与项目 photos/ 不同）
+                if photo_base_dir and os.path.exists(photo_base_dir) and \
+                   not self._is_same_path(photo_base_dir, src_photos):
+                    for root, dirs, files in os.walk(photo_base_dir):
+                        # 跳过 junction/symlink，防止递归死循环
+                        dirs[:] = [d for d in dirs
+                                   if not os.path.islink(os.path.join(root, d))
+                                   and not self._is_junction(os.path.join(root, d))]
+                        for f in files:
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                                full = os.path.join(root, f)
+                                key = os.path.basename(f).lower()
+                                if key not in seen_names:
+                                    seen_names.add(key)
+                                    photos_to_pack.append(full)
+
+                print(f"[导出] 准备压缩 {len(photos_to_pack)} 张照片...")
+                total_orig = 0
+                total_new = 0
+                for src_file in photos_to_pack:
+                    compressed = self._compress_image_for_mobile(src_file)
+                    if compressed is None:
+                        continue
+                    total_orig += os.path.getsize(src_file)
+                    total_new += len(compressed)
+                    basename = os.path.basename(src_file)
+                    # 写入 photos/ 目录（保留原文件名）
+                    zf.writestr(f"photos/{basename}", compressed)
+
+                if photos_to_pack:
+                    print(f"[导出] 照片压缩完成: "
+                          f"{total_orig//1024}KB → {total_new//1024}KB "
+                          f"(节省 {100 - total_new*100//max(total_orig,1)}%)")
 
             QMessageBox.information(self, "导出成功",
                 f"采集端数据包已导出到:\n{export_path}\n\n可直接导入采集端继续使用。")
@@ -11150,7 +13215,7 @@ function jumpToMarker(targetId) {
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V1.9.9</h2>
+            """<h2>随系 · 影像管理器 V2.0.2</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>

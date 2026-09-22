@@ -211,6 +211,8 @@ class Project:
 # 独立查看包启动器代码（导出时内嵌写入）
 # =============================================================================
 
+# 注意：修改此启动器源码时，需同步更新 ../launcher/launcher.py
+# （一键打包exe.bat 会用后者预编译「双击查看.exe」并内嵌进管理器 exe）
 LAUNCHER_PY_CODE = r'''#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """随系 · 独立查看包启动器
@@ -320,6 +322,30 @@ echo 输出文件：双击查看.exe
 echo 可直接双击运行，无需安装管理器。
 pause
 '''
+
+
+def _copy_prebuilt_launcher_exe(dest_exe_path):
+    """尝试复制预编译的「双击查看.exe」到目标路径。
+
+    打包后的 exe 内嵌了预编译启动器（见根目录 一键打包exe.bat 的 --add-data），
+    直接复制即可，目标电脑无需安装 Python/PyInstaller。
+    成功返回 True，否则返回 False（调用方回退到现场 PyInstaller 打包）。
+    """
+    candidates = []
+    # 打包模式：exe 内嵌资源
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        candidates.append(os.path.join(sys._MEIPASS, 'launcher_template', '双击查看.exe'))
+    # 开发模式：源码同级 launcher/ 目录下的预编译 exe
+    candidates.append(os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), '..', 'launcher', '双击查看.exe')))
+    for src in candidates:
+        if os.path.exists(src):
+            try:
+                shutil.copy2(src, dest_exe_path)
+                return True
+            except Exception as e:
+                print(f"[调试] 复制预编译启动器失败: {e}")
+    return False
 
 # =============================================================================
 # HTTP 服务器线程
@@ -12573,32 +12599,39 @@ function jumpToMarker(targetId) {
             progress.setValue(80)
             QApplication.processEvents()
             
-            # ========== 6. 尝试自动打包 ==========
+            # ========== 6. 获取 双击查看.exe（优先复制内嵌预编译版，回退现场打包） ==========
             launcher_exe = os.path.join(package_dir, "双击查看.exe")
             auto_built = False
-            try:
-                import subprocess
-                work_dir = os.path.join(package_dir, '_build')
-                os.makedirs(work_dir, exist_ok=True)
-                result = subprocess.run(
-                    ['python', '-m', 'PyInstaller', '--name', '双击查看', '--onefile', '--noconsole',
-                     '--distpath', package_dir, '--workpath', work_dir, '--specpath', package_dir,
-                     launcher_py],
-                    capture_output=True, text=True, timeout=180
-                )
-                if result.returncode == 0 and os.path.exists(launcher_exe):
-                    shutil.rmtree(work_dir, ignore_errors=True)
-                    if os.path.exists(launcher_py):
-                        os.remove(launcher_py)
-                    spec_file = os.path.join(package_dir, '双击查看.spec')
-                    if os.path.exists(spec_file):
-                        os.remove(spec_file)
-                    auto_built = True
-                else:
-                    print(f"[调试] PyInstaller 输出: {result.stderr}")
-                    shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception as e:
-                print(f"[调试] 自动打包失败: {e}")
+            if _copy_prebuilt_launcher_exe(launcher_exe):
+                # 已复制预编译 exe，launcher.py / build_launcher.bat 不再需要
+                for _f in (launcher_py, build_bat):
+                    if os.path.exists(_f):
+                        os.remove(_f)
+                auto_built = True
+            if not auto_built:
+                try:
+                    import subprocess
+                    work_dir = os.path.join(package_dir, '_build')
+                    os.makedirs(work_dir, exist_ok=True)
+                    result = subprocess.run(
+                        ['python', '-m', 'PyInstaller', '--name', '双击查看', '--onefile', '--noconsole',
+                         '--distpath', package_dir, '--workpath', work_dir, '--specpath', package_dir,
+                         launcher_py],
+                        capture_output=True, text=True, timeout=180
+                    )
+                    if result.returncode == 0 and os.path.exists(launcher_exe):
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                        if os.path.exists(launcher_py):
+                            os.remove(launcher_py)
+                        spec_file = os.path.join(package_dir, '双击查看.spec')
+                        if os.path.exists(spec_file):
+                            os.remove(spec_file)
+                        auto_built = True
+                    else:
+                        print(f"[调试] PyInstaller 输出: {result.stderr}")
+                        shutil.rmtree(work_dir, ignore_errors=True)
+                except Exception as e:
+                    print(f"[调试] 自动打包失败: {e}")
             
             progress.setValue(100)
             QApplication.processEvents()
@@ -13157,29 +13190,36 @@ function jumpToMarker(targetId) {
 
                 launcher_exe = os.path.join(package_dir, "双击查看.exe")
                 auto_built = False
-                try:
-                    import subprocess
-                    work_dir = os.path.join(package_dir, '_build')
-                    os.makedirs(work_dir, exist_ok=True)
-                    result = subprocess.run(
-                        ['python', '-m', 'PyInstaller', '--name', '双击查看', '--onefile', '--noconsole',
-                         '--distpath', package_dir, '--workpath', work_dir, '--specpath', package_dir,
-                         launcher_py],
-                        capture_output=True, text=True, timeout=180
-                    )
-                    if result.returncode == 0 and os.path.exists(launcher_exe):
-                        shutil.rmtree(work_dir, ignore_errors=True)
-                        if os.path.exists(launcher_py):
-                            os.remove(launcher_py)
-                        spec_file = os.path.join(package_dir, '双击查看.spec')
-                        if os.path.exists(spec_file):
-                            os.remove(spec_file)
-                        auto_built = True
-                    else:
-                        print(f"[调试] PyInstaller 输出: {result.stderr}")
-                        shutil.rmtree(work_dir, ignore_errors=True)
-                except Exception as e:
-                    print(f"[调试] 自动打包失败: {e}")
+                if _copy_prebuilt_launcher_exe(launcher_exe):
+                    # 已复制预编译 exe，launcher.py / build_launcher.bat 不再需要
+                    for _f in (launcher_py, build_bat):
+                        if os.path.exists(_f):
+                            os.remove(_f)
+                    auto_built = True
+                if not auto_built:
+                    try:
+                        import subprocess
+                        work_dir = os.path.join(package_dir, '_build')
+                        os.makedirs(work_dir, exist_ok=True)
+                        result = subprocess.run(
+                            ['python', '-m', 'PyInstaller', '--name', '双击查看', '--onefile', '--noconsole',
+                             '--distpath', package_dir, '--workpath', work_dir, '--specpath', package_dir,
+                             launcher_py],
+                            capture_output=True, text=True, timeout=180
+                        )
+                        if result.returncode == 0 and os.path.exists(launcher_exe):
+                            shutil.rmtree(work_dir, ignore_errors=True)
+                            if os.path.exists(launcher_py):
+                                os.remove(launcher_py)
+                            spec_file = os.path.join(package_dir, '双击查看.spec')
+                            if os.path.exists(spec_file):
+                                os.remove(spec_file)
+                            auto_built = True
+                        else:
+                            print(f"[调试] PyInstaller 输出: {result.stderr}")
+                            shutil.rmtree(work_dir, ignore_errors=True)
+                    except Exception as e:
+                        print(f"[调试] 自动打包失败: {e}")
 
                 progress.setValue(100)
                 QApplication.processEvents()
@@ -13215,7 +13255,7 @@ function jumpToMarker(targetId) {
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于",
-            """<h2>随系 · 影像管理器 V2.0.2</h2>
+            """<h2>随系 · 影像管理器 V2.0.3</h2>
             <p>用于商业改造现场的影像与平面图关联管理工具</p>
             <p>特点: 100% 离线、数据本地、现场容错优先</p>
             <p>© 2026 PanoramaManager</p>

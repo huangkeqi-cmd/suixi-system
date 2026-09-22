@@ -1,61 +1,98 @@
-# Python
+# ========== Python ==========
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg
 *.egg-info/
+.venv/
 venv/
 .env
+.env.*
+!.env.example
 
-# PyInstaller
+# ========== 测试 / 静态检查 ==========
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ========== PyInstaller ==========
 build/
 dist/
 *.spec
+*.exe
+*.dll
+*.so
+*.dylib
 
-# 随系特定
+# ========== 日志与临时文件 ==========
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+*.rej
+*.orig
+*.bak
+
+# ========== 随系特定 ==========
 *.sxp
 projects/
 viewer/output/
 /test_media/
 /temp/
 
-# 内部文档（不上传）
+# ========== 内部文档（不上传）==========
 随系开发定位书.md
 *.private.md
-
-# IDE/OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-
-# 日志与临时文件
-*.log
-*.tmp
-*.swp
-*.swo
-*~
-
-# Node.js（为未来前端扩展预留）
-node_modules/
-package-lock.json
-yarn.lock
-
-# 构建产物（通用）
-out/
-coverage/
-
-# 临时脚本（开发辅助）
-split_capture.py
-pdf_to_jpg.py
-
-# 内部交付文档（不上传）
 PanoramaManager/HTTPS配置指南.md
 PanoramaManager/TestFlight安装指南.txt
 PanoramaManager/使用说明.txt
 
-# 大体积媒体文件
+# ========== 大体积媒体 ==========
 PanoramaCapture/promo_video.mp4
+*.mp4
+*.mov
+*.avi
+*.zip
+*.7z
+*.rar
 
+# ========== IDE / OS ==========
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+*.suo
+*.user
+
+# ========== Node.js（前端预留）==========
+node_modules/
+# 注意：package-lock.json 和 yarn.lock 要提交，不要忽略
+
+# ========== 构建产物 ==========
+out/
+coverage/
+
+# ========== 临时脚本 ==========
+split_capture.py
+pdf_to_jpg.py
+
+# ========== 数据库 ==========
+*.db
+*.sqlite3
+
+# ========== 敏感文件 ==========
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# ========== 自动推送脚本（仅本机用）==========
 一键推送更新.bat
-
-PanoramaManager/PanoramaMapper-PC/src/debug.log
+一键推送更新-淘汰.txt
+push_all.bat
+push_capture.bat
+push_capture_beta.bat
+push_main_py.bat

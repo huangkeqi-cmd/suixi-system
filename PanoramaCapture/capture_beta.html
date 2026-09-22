@@ -264,6 +264,27 @@ body { background:#000; color:#fff; font-family:-apple-system, BlinkMacSystemFon
 #saveImagePanel .save-instruction strong { color: #ffcc00; }
 #saveImagePanel .btn-save-action { padding: 16px 32px; background: #30d158; color: #000; border: none; border-radius: 12px; font-size: 16px; font-weight: bold; margin-bottom: 12px; cursor: pointer; }
 #saveImagePanel .btn-save-cancel { padding: 12px 24px; background: #48484a; color: #fff; border: none; border-radius: 10px; font-size: 14px; cursor: pointer; }
+
+/* ===== 跳转模式弹窗 ===== */
+#jumpDialog {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.78); z-index: 900;
+  display: none; align-items: center; justify-content: center;
+  backdrop-filter: blur(6px);
+}
+#jumpDialog .jump-card {
+  background: #1c1c1e; border-radius: 18px; padding: 24px 20px;
+  width: 85%; max-width: 340px; border: 1px solid #333;
+  text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  animation: batchPanelIn 0.2s ease-out;
+}
+#jumpDialog .jump-icon { font-size: 42px; line-height: 1; margin-bottom: 12px; }
+#jumpDialog h3 { font-size: 18px; margin-bottom: 10px; color: #fff; }
+#jumpDialog p { font-size: 14px; color: #8e8e93; line-height: 1.6; margin-bottom: 20px; }
+#jumpDialog p strong { color: #ffcc00; }
+#jumpDialog .btn-jump-open { display: block; width: 100%; padding: 16px; border-radius: 12px; border: none; background: #30d158; color: #000; font-size: 17px; font-weight: bold; margin-bottom: 10px; cursor: pointer; }
+#jumpDialog .btn-jump-cancel { display: block; width: 100%; padding: 14px; border-radius: 12px; border: none; background: #48484a; color: #fff; font-size: 15px; cursor: pointer; }
+#jumpDialog .jump-scheme { font-size: 11px; color: #555; margin-top: 12px; font-family: monospace; }
 </style>
 </head>
 <body>
@@ -555,6 +576,18 @@ body { background:#000; color:#fff; font-family:-apple-system, BlinkMacSystemFon
   </div>
 </div>
 
+<!-- ===== 跳转模式弹窗 ===== -->
+<div id="jumpDialog" onclick="if(event.target===this) hideJumpDialog()">
+  <div class="jump-card">
+    <div class="jump-icon">🚀</div>
+    <h3>跳转到 DJI Mimo</h3>
+    <p>将打开 <strong>DJI Mimo</strong> App 进行拍摄<br>拍摄完成后返回本页面，点击「⭕ 我已拍完」</p>
+    <button class="btn-jump-open" onclick="doJumpToApp()">打开 DJI Mimo</button>
+    <button class="btn-jump-cancel" onclick="hideJumpDialog()">稍后</button>
+    <div class="jump-scheme">djimimo://</div>
+  </div>
+</div>
+
 <div id="msg"></div>
 
 <script>
@@ -585,8 +618,16 @@ var tempSaveFile = null;
 var tempSaveFileName = '';
 var FLOOR_MENU_TARGET_ID = null;
 
-// ========== 手机拍摄模式 ==========
-var PHONE_CAMERA_MODE = true;
+// ============================================================
+// ✅【新增】拍摄模式：'phone' 本机 / 'external' 外设 / 'jump' 跳转
+// ============================================================
+var CAPTURE_MODE = 'external';
+var CAPTURE_MODE_ORDER = ['phone', 'external', 'jump'];
+
+// 跳转目标（DJI Mimo 的 URL Scheme）
+var JUMP_SCHEME = 'djimimo://';
+var JUMP_APP_NAME = 'DJI Mimo';
+
 var PHONE_CAPTURE_TYPE = 'photo';
 var PENDING_SAVE_AFTER_CAPTURE = false;
 var PENDING_FINISH_AFTER_CAPTURE = false;
@@ -2360,6 +2401,7 @@ function handleClick(cx, cy){
     ACTIVE = id;
     saveData(); updateDots();
     centerOnMarker(m);
+    // showCapturePanel 内部会根据 CAPTURE_MODE 决定：本机→相机 / 跳转→弹窗 / 外设→语音
     showCapturePanel();
   }
 }
@@ -2399,8 +2441,12 @@ function showCapturePanel(){
   updatePanelButtons();
   updateSaveAlbumButton();
   setDirMode(DIRECTION_MODE);
-  if (PHONE_CAMERA_MODE) {
+  // ===== 根据拍摄模式走不同流程 =====
+  if (CAPTURE_MODE === 'phone') {
     setTimeout(function(){ openPhoneCamera(); }, 300);
+  } else if (CAPTURE_MODE === 'jump') {
+    // 🚀 跳转模式：放置灰点后立即弹窗，确认后调起 djimimo://
+    setTimeout(function(){ showJumpDialog(); }, 300);
   } else {
     speak(VOICE_TEXT);
   }
@@ -2449,20 +2495,35 @@ function loadVoiceSettings(){
   try{ var t=localStorage.getItem('panorama_voice_text'); if(t) VOICE_TEXT=t; var r=localStorage.getItem('panorama_voice_rate'); if(r) VOICE_RATE=parseFloat(r); }catch(e){}
 }
 
+// ============================================================
+// ✅【改造】三模式循环切换：本机 → 外设 → 跳转 → 本机
+// ============================================================
 function togglePhoneCameraMode(){
-  PHONE_CAMERA_MODE = !PHONE_CAMERA_MODE;
-  localStorage.setItem('panorama_phone_camera_mode', PHONE_CAMERA_MODE);
+  var idx = CAPTURE_MODE_ORDER.indexOf(CAPTURE_MODE);
+  if (idx < 0) idx = 0;
+  CAPTURE_MODE = CAPTURE_MODE_ORDER[(idx + 1) % CAPTURE_MODE_ORDER.length];
+  try {
+    localStorage.setItem('panorama_capture_mode', CAPTURE_MODE);
+    // 兼容旧字段
+    localStorage.setItem('panorama_phone_camera_mode', CAPTURE_MODE === 'phone');
+  } catch(e) {}
   updatePanelButtons();
-  if (PHONE_CAMERA_MODE) showMsg('📱 本机拍摄模式');
-  else showMsg('📷 外设拍摄模式');
+  if (CAPTURE_MODE === 'phone') {
+    showMsg('📱 本机拍摄模式');
+  } else if (CAPTURE_MODE === 'jump') {
+    showMsg('🚀 跳转模式：放置点位将跳转 ' + JUMP_APP_NAME);
+  } else {
+    showMsg('📷 外设拍摄模式');
+  }
 }
+
 function updatePanelButtons(){
   var modeBtn = $('modeToggleBtn');
   var actionBtn = $('panelActionBtn');
   var settingsBtn = $('panelSettingsBtn');
-  var saveBtn = $('btnSaveAlbum');
   if (!modeBtn || !actionBtn || !settingsBtn) return;
-  if (PHONE_CAMERA_MODE) {
+
+  if (CAPTURE_MODE === 'phone') {
     modeBtn.innerHTML = '📱 本机';
     modeBtn.style.background = '#ff453a';
     modeBtn.style.color = '#fff';
@@ -2470,7 +2531,14 @@ function updatePanelButtons(){
     actionBtn.onclick = function(){ reCapture(); };
     settingsBtn.innerHTML = '拍摄设置';
     settingsBtn.onclick = function(){ showCaptureSettings(); };
-    if (saveBtn) saveBtn.style.display = 'none';
+  } else if (CAPTURE_MODE === 'jump') {
+    modeBtn.innerHTML = '🚀 跳转';
+    modeBtn.style.background = '#ff9500';
+    modeBtn.style.color = '#000';
+    actionBtn.innerHTML = '🚀 打开 ' + JUMP_APP_NAME;
+    actionBtn.onclick = function(){ showJumpDialog(); };
+    settingsBtn.innerHTML = '拍摄设置';
+    settingsBtn.onclick = function(){ showCaptureSettings(); };
   } else {
     modeBtn.innerHTML = '📷 外设';
     modeBtn.style.background = '#8e8e93';
@@ -2479,9 +2547,32 @@ function updatePanelButtons(){
     actionBtn.onclick = function(){ reSpeak(); };
     settingsBtn.innerHTML = '语音设置';
     settingsBtn.onclick = function(){ showVoiceSettings(); };
-    if (saveBtn) saveBtn.style.display = 'none';
   }
 }
+
+// ============================================================
+// ✅【新增】跳转模式：弹窗 + 调起 djimimo://
+// ============================================================
+function showJumpDialog(){
+  var dlg = $('jumpDialog');
+  if (!dlg) return;
+  dlg.style.display = 'flex';
+}
+function hideJumpDialog(){
+  var dlg = $('jumpDialog');
+  if (dlg) dlg.style.display = 'none';
+}
+function doJumpToApp(){
+  hideJumpDialog();
+  showMsg('正在跳转 ' + JUMP_APP_NAME + '...');
+  try {
+    // iOS/Android 都会弹出「是否打开 XX App」的系统确认框
+    window.location.href = JUMP_SCHEME;
+  } catch(e) {
+    showMsg('跳转失败，请确认已安装 ' + JUMP_APP_NAME);
+  }
+}
+
 function detectBrowser(){
   var ua = navigator.userAgent;
   var isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
@@ -2505,11 +2596,14 @@ function openPhoneCamera(){
 function updateSaveAlbumButton(){
   var btn = $('btnSaveAlbum');
   if (!btn) return;
-  if (PHONE_CAMERA_MODE) {
+  if (CAPTURE_MODE === 'phone') {
+    btn.style.display = 'block';
     btn.disabled = false;
     btn.style.opacity = '1';
     if (lastPhotoBlob) btn.innerHTML = '💾 保存到相册 (' + (lastPhotoName || '照片') + ')';
     else btn.innerHTML = '💾 点击拍摄并保存';
+  } else {
+    btn.style.display = 'none';
   }
 }
 function saveLastPhotoToAlbum(){
@@ -2593,7 +2687,16 @@ function handlePhoneCapture(e){
   }
   e.target.value = '';
 }
-function reCapture(){ if (PHONE_CAMERA_MODE) openPhoneCamera(); else reSpeak(); }
+
+// ============================================================
+// ✅【改造】reCapture 支持跳转模式
+// ============================================================
+function reCapture(){
+  if (CAPTURE_MODE === 'phone') openPhoneCamera();
+  else if (CAPTURE_MODE === 'jump') showJumpDialog();
+  else reSpeak();
+}
+
 function showCaptureSettings(){ $('captureSettingsPanel').style.display='block'; updateCaptureTypeUI(); }
 function hideCaptureSettings(){ $('captureSettingsPanel').style.display='none'; }
 function setCaptureType(type){ PHONE_CAPTURE_TYPE=type; updateCaptureTypeUI(); }
@@ -2611,20 +2714,35 @@ function updateCaptureTypeUI(){
 }
 function testCapture(){ openPhoneCamera(); }
 function saveCaptureSettings(){ localStorage.setItem('panorama_phone_capture_type',PHONE_CAPTURE_TYPE); hideCaptureSettings(); showMsg('拍摄设置已保存'); }
+
+// ============================================================
+// ✅【改造】loadCaptureSettings 读取三模式（兼容旧字段）
+// ============================================================
 function loadCaptureSettings(){
   try{
-    var savedMode=localStorage.getItem('panorama_phone_camera_mode');
-    if(savedMode===null) PHONE_CAMERA_MODE=false;
-    else PHONE_CAMERA_MODE=savedMode==='true';
+    var saved = localStorage.getItem('panorama_capture_mode');
+    if (saved && CAPTURE_MODE_ORDER.indexOf(saved) >= 0) {
+      CAPTURE_MODE = saved;
+    } else {
+      // 兼容旧版仅保存 boolean 的情况
+      var old = localStorage.getItem('panorama_phone_camera_mode');
+      if (old === 'true') CAPTURE_MODE = 'phone';
+      else if (old === 'false') CAPTURE_MODE = 'external';
+      else CAPTURE_MODE = 'external';
+    }
     var savedType=localStorage.getItem('panorama_phone_capture_type');
     if(savedType && ['photo','panorama','video'].indexOf(savedType)>=0) PHONE_CAPTURE_TYPE=savedType;
   }catch(e){}
 }
+
+// ============================================================
+// ✅【改造】doCapture 使用 CAPTURE_MODE
+// ============================================================
 function doCapture(){
   if(!ACTIVE) return;
   var m=findMarker(ACTIVE);
   if(!m) return;
-  if (PHONE_CAMERA_MODE) {
+  if (CAPTURE_MODE === 'phone') {
     if (!lastPhotoBlob) {
       PENDING_FINISH_AFTER_CAPTURE = true;
       PENDING_SAVE_AFTER_CAPTURE = true;
@@ -3055,7 +3173,13 @@ window.onload = function() {
   loadFloorBarSettings();
   loadCaptureSettings();
   loadDirectionSettings();
-  setTimeout(function(){ loadData(); setDirMode(DIRECTION_MODE); },100);
+  setTimeout(function(){
+    loadData();
+    setDirMode(DIRECTION_MODE);
+    // ✅ 初始化模式按钮文字/颜色
+    updatePanelButtons();
+    updateSaveAlbumButton();
+  },100);
 };
 
 // floorPlanInput 变化处理

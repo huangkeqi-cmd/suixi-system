@@ -2445,9 +2445,9 @@ function showCapturePanel(){
   if (CAPTURE_MODE === 'phone') {
     setTimeout(function(){ openPhoneCamera(); }, 300);
   } else if (CAPTURE_MODE === 'jump') {
-    // 🚀 跳转模式：放置灰点后立即弹窗，确认后调起 djimimo://
-    setTimeout(function(){ showJumpDialog(); }, 300);
-  } else {
+    // 🚀 跳转模式：放置灰点后直接跳转，无需二次确认
+    setTimeout(function(){ doJumpToApp(); }, 200);
+  }else {
     speak(VOICE_TEXT);
   }
 }
@@ -2536,7 +2536,7 @@ function updatePanelButtons(){
     modeBtn.style.background = '#ff9500';
     modeBtn.style.color = '#000';
     actionBtn.innerHTML = '🚀 打开 ' + JUMP_APP_NAME;
-    actionBtn.onclick = function(){ showJumpDialog(); };
+    actionBtn.onclick = function(){ doJumpToApp(); };
     settingsBtn.innerHTML = '拍摄设置';
     settingsBtn.onclick = function(){ showCaptureSettings(); };
   } else {
@@ -2563,10 +2563,9 @@ function hideJumpDialog(){
   if (dlg) dlg.style.display = 'none';
 }
 function doJumpToApp(){
-  hideJumpDialog();
+  // hideJumpDialog();  // 可删除
   showMsg('正在跳转 ' + JUMP_APP_NAME + '...');
   try {
-    // iOS/Android 都会弹出「是否打开 XX App」的系统确认框
     window.location.href = JUMP_SCHEME;
   } catch(e) {
     showMsg('跳转失败，请确认已安装 ' + JUMP_APP_NAME);
@@ -2693,7 +2692,7 @@ function handlePhoneCapture(e){
 // ============================================================
 function reCapture(){
   if (CAPTURE_MODE === 'phone') openPhoneCamera();
-  else if (CAPTURE_MODE === 'jump') showJumpDialog();
+  else if (CAPTURE_MODE === 'jump') doJumpToApp();
   else reSpeak();
 }
 

@@ -472,6 +472,37 @@ body { background:#000; color:#fff; font-family:-apple-system, BlinkMacSystemFon
   <div id="shareHint" class="share-hint" style="display:none;"></div>
 </div>
 
+<!-- 中继连接面板 -->
+<div id="relayConnectPanel" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1c1c1e; padding:25px; border-radius:16px; min-width:320px; max-width:90vw; display:none; z-index:600; border:1px solid #333;">
+  <h3 style="margin-bottom:15px; font-size:17px; text-align:center;">📡 连接中继设备</h3>
+  <div style="margin-bottom:15px;">
+    <label style="display:block; margin-bottom:8px; color:#8e8e93; font-size:14px;">ESP32-C6 IP 地址</label>
+    <input type="text" id="relayIP" placeholder="192.168.4.1" style="width:100%; padding:12px; background:#2c2c2e; color:#fff; border:1px solid #38383a; border-radius:8px; font-size:16px; box-sizing:border-box;">
+  </div>
+  <div style="margin-bottom:20px;">
+    <label style="display:block; margin-bottom:8px; color:#8e8e93; font-size:14px;">端口</label>
+    <input type="text" id="relayPort" value="81" style="width:100%; padding:12px; background:#2c2c2e; color:#fff; border:1px solid #38383a; border-radius:8px; font-size:16px; box-sizing:border-box;">
+  </div>
+  <div style="display:flex; gap:10px;">
+    <button onclick="doConnectRelay()" style="flex:1; padding:14px; background:#30d158; color:#000; border:none; border-radius:10px; font-size:15px; font-weight:600;">连接</button>
+    <button onclick="hideRelayConnectPanel()" style="flex:1; padding:14px; background:#48484a; color:#fff; border:none; border-radius:10px; font-size:15px;">取消</button>
+  </div>
+  <div style="margin-top:15px; font-size:12px; color:#8e8e93; line-height:1.6;">
+    请将手机连接到 ESP32-C6 的 Wi-Fi 热点（OsmoRelay），或确保手机与 ESP32-C6 在同一局域网。
+  </div>
+</div>
+
+<!-- 中继状态面板 -->
+<div id="relayStatusPanel" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1c1c1e; padding:25px; border-radius:16px; min-width:300px; max-width:90vw; display:none; z-index:600; border:1px solid #333;">
+  <h3 style="margin-bottom:15px; font-size:17px; text-align:center;">📊 中继状态</h3>
+  <div id="relayStatusContent" style="font-size:14px; line-height:2; color:#ccc;"></div>
+  <div style="display:flex; gap:10px; margin-top:20px;">
+    <button onclick="relaySend({cmd:'reconnect_camera'})" style="flex:1; padding:12px; background:#0a84ff; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600;">重连相机</button>
+    <button onclick="disconnectRelay()" style="flex:1; padding:12px; background:#ff453a; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600;">断开中继</button>
+    <button onclick="hideRelayStatus()" style="flex:1; padding:12px; background:#48484a; color:#fff; border:none; border-radius:10px; font-size:14px;">关闭</button>
+  </div>
+</div>
+
 <div id="newProjectPanel">
   <h2>🏗️ 新建项目</h2>
   <div class="input-group">
@@ -585,11 +616,30 @@ var tempSaveFile = null;
 var tempSaveFileName = '';
 var FLOOR_MENU_TARGET_ID = null;
 
-// ========== 手机拍摄模式 ==========
-var PHONE_CAMERA_MODE = true;
+// ========== 采集模式（本机 / 外设 / 中继） ==========
+// 'phone'  = 本机拍摄
+// 'remote' = 外设拍摄（语音提示）
+// 'relay'  = 中继模式（ESP32-C6 转发）
+var CAPTURE_MODE = 'phone';
 var PHONE_CAPTURE_TYPE = 'photo';
 var PENDING_SAVE_AFTER_CAPTURE = false;
 var PENDING_FINISH_AFTER_CAPTURE = false;
+
+// ========== 中继连接状态 ==========
+var RELAY_WS = null;              // WebSocket 实例
+var RELAY_CONNECTED = false;      // 是否已连接 ESP32-C6
+var RELAY_CAMERA_READY = false;   // 相机是否已通过 BLE 连接
+var RELAY_CAMERA_MODEL = '';      // 相机型号
+var RELAY_LAST_CMD_ID = null;     // 最近一条指令 ID（用于回传匹配）
+var RELAY_STATUS = {              // 相机实时状态
+  recording: false,
+  battery: -1,
+  sdFreeMB: -1,
+  mode: 'unknown'                 // 'photo' | 'video' | 'unknown'
+};
+var RELAY_RECONNECT_TIMER = null; // 自动重连计时器
+var RELAY_PING_TIMER = null;      // 保活心跳计时器
+var RELAY_LAST_MSG_MS = 0;        // 最近一次收到中继消息的时间
 
 // ========== 保存到相册临时数据 ==========
 var lastPhotoBlob = null;
@@ -2361,6 +2411,10 @@ function handleClick(cx, cy){
     saveData(); updateDots();
     centerOnMarker(m);
     showCapturePanel();
+    // 中继模式：放置采集点后自动发起一次拍摄
+    if (CAPTURE_MODE === 'relay' && RELAY_CONNECTED && RELAY_CAMERA_READY) {
+      setTimeout(function(){ if (ACTIVE === id) doCapture(); }, 600);
+    }
   }
 }
 
@@ -2399,10 +2453,15 @@ function showCapturePanel(){
   updatePanelButtons();
   updateSaveAlbumButton();
   setDirMode(DIRECTION_MODE);
-  if (PHONE_CAMERA_MODE) {
+  if (CAPTURE_MODE === 'phone') {
     setTimeout(function(){ openPhoneCamera(); }, 300);
-  } else {
+  } else if (CAPTURE_MODE === 'remote') {
     speak(VOICE_TEXT);
+  } else {
+    // 中继模式：提示拍摄方式
+    if (!RELAY_CONNECTED) showMsg('⚠️ 中继未连接，请点副按钮「📡 中继未连」连接');
+    else if (!RELAY_CAMERA_READY) showMsg('⚠️ 相机未连接，请点副按钮「📡 中继已连」重连相机');
+    else showMsg('📸 确认相机就绪后，点「📸 拍摄」按钮拍照');
   }
 }
 function togglePanelMinimize(){
@@ -2450,11 +2509,25 @@ function loadVoiceSettings(){
 }
 
 function togglePhoneCameraMode(){
-  PHONE_CAMERA_MODE = !PHONE_CAMERA_MODE;
-  localStorage.setItem('panorama_phone_camera_mode', PHONE_CAMERA_MODE);
+  var modes = ['phone', 'remote', 'relay'];
+  var idx = modes.indexOf(CAPTURE_MODE);
+  CAPTURE_MODE = modes[(idx + 1) % modes.length];
+  try { localStorage.setItem('panorama_capture_mode', CAPTURE_MODE); } catch(e) {}
+
   updatePanelButtons();
-  if (PHONE_CAMERA_MODE) showMsg('📱 本机拍摄模式');
-  else showMsg('📷 外设拍摄模式');
+
+  if (CAPTURE_MODE === 'phone') {
+    showMsg('📱 本机拍摄模式');
+  } else if (CAPTURE_MODE === 'remote') {
+    showMsg('📷 外设拍摄模式（语音提示）');
+    speak(VOICE_TEXT);
+  } else {
+    showMsg('📡 中继模式 — 请确保 ESP32-C6 已通电');
+    // 尝试自动重连上次的中继地址
+    var savedIP = localStorage.getItem('panorama_relay_ip');
+    if (savedIP && !RELAY_CONNECTED) connectRelay(savedIP, localStorage.getItem('panorama_relay_port') || '81');
+  }
+  updateSaveAlbumButton();
 }
 function updatePanelButtons(){
   var modeBtn = $('modeToggleBtn');
@@ -2462,23 +2535,35 @@ function updatePanelButtons(){
   var settingsBtn = $('panelSettingsBtn');
   var saveBtn = $('btnSaveAlbum');
   if (!modeBtn || !actionBtn || !settingsBtn) return;
-  if (PHONE_CAMERA_MODE) {
-    modeBtn.innerHTML = '📱 本机';
-    modeBtn.style.background = '#ff453a';
-    modeBtn.style.color = '#fff';
+
+  // 模式按钮：循环切换 本机 → 外设 → 中继
+  var modeLabels = { phone: '📱 本机', remote: '📷 外设', relay: '📡 中继' };
+  var modeColors = { phone: '#ff453a', remote: '#8e8e93', relay: '#0a84ff' };
+  modeBtn.innerHTML = modeLabels[CAPTURE_MODE];
+  modeBtn.style.background = modeColors[CAPTURE_MODE];
+  modeBtn.style.color = '#fff';
+
+  if (CAPTURE_MODE === 'phone') {
     actionBtn.innerHTML = '🔄 重新拍摄';
     actionBtn.onclick = function(){ reCapture(); };
     settingsBtn.innerHTML = '拍摄设置';
     settingsBtn.onclick = function(){ showCaptureSettings(); };
     if (saveBtn) saveBtn.style.display = 'none';
-  } else {
-    modeBtn.innerHTML = '📷 外设';
-    modeBtn.style.background = '#8e8e93';
-    modeBtn.style.color = '#fff';
+  } else if (CAPTURE_MODE === 'remote') {
     actionBtn.innerHTML = '🔊 重新语音';
     actionBtn.onclick = function(){ reSpeak(); };
     settingsBtn.innerHTML = '语音设置';
     settingsBtn.onclick = function(){ showVoiceSettings(); };
+    if (saveBtn) saveBtn.style.display = 'none';
+  } else {
+    // 中继模式：主按钮 = 拍摄，副按钮 = 中继连接状态
+    actionBtn.innerHTML = '📸 拍摄';
+    actionBtn.onclick = function(){ doCapture(); };
+    settingsBtn.innerHTML = RELAY_CONNECTED ? '📡 中继已连' : '📡 中继未连';
+    settingsBtn.onclick = function(){
+      if (!RELAY_CONNECTED) showRelayConnectPanel();
+      else showRelayStatus();
+    };
     if (saveBtn) saveBtn.style.display = 'none';
   }
 }
@@ -2505,7 +2590,7 @@ function openPhoneCamera(){
 function updateSaveAlbumButton(){
   var btn = $('btnSaveAlbum');
   if (!btn) return;
-  if (PHONE_CAMERA_MODE) {
+  if (CAPTURE_MODE === 'phone') {
     btn.disabled = false;
     btn.style.opacity = '1';
     if (lastPhotoBlob) btn.innerHTML = '💾 保存到相册 (' + (lastPhotoName || '照片') + ')';
@@ -2593,7 +2678,11 @@ function handlePhoneCapture(e){
   }
   e.target.value = '';
 }
-function reCapture(){ if (PHONE_CAMERA_MODE) openPhoneCamera(); else reSpeak(); }
+function reCapture(){
+  if (CAPTURE_MODE === 'phone') openPhoneCamera();
+  else if (CAPTURE_MODE === 'remote') reSpeak();
+  else doCapture();  // 中继模式：重新发送拍摄指令
+}
 function showCaptureSettings(){ $('captureSettingsPanel').style.display='block'; updateCaptureTypeUI(); }
 function hideCaptureSettings(){ $('captureSettingsPanel').style.display='none'; }
 function setCaptureType(type){ PHONE_CAPTURE_TYPE=type; updateCaptureTypeUI(); }
@@ -2613,18 +2702,256 @@ function testCapture(){ openPhoneCamera(); }
 function saveCaptureSettings(){ localStorage.setItem('panorama_phone_capture_type',PHONE_CAPTURE_TYPE); hideCaptureSettings(); showMsg('拍摄设置已保存'); }
 function loadCaptureSettings(){
   try{
-    var savedMode=localStorage.getItem('panorama_phone_camera_mode');
-    if(savedMode===null) PHONE_CAMERA_MODE=false;
-    else PHONE_CAMERA_MODE=savedMode==='true';
+    var savedMode = localStorage.getItem('panorama_capture_mode');
+    if (savedMode && ['phone','remote','relay'].indexOf(savedMode) >= 0) {
+      CAPTURE_MODE = savedMode;
+    } else {
+      // 兼容旧版布尔值
+      var oldMode = localStorage.getItem('panorama_phone_camera_mode');
+      if (oldMode === null) CAPTURE_MODE = 'remote';
+      else CAPTURE_MODE = (oldMode === 'false') ? 'remote' : 'phone';
+    }
     var savedType=localStorage.getItem('panorama_phone_capture_type');
     if(savedType && ['photo','panorama','video'].indexOf(savedType)>=0) PHONE_CAPTURE_TYPE=savedType;
   }catch(e){}
 }
+// ============================================================
+// 中继模式：WebSocket 通信
+// ============================================================
+var RELAY_PROTOCOL_VERSION = 1;
+
+function relaySend(obj) {
+  if (!RELAY_WS || RELAY_WS.readyState !== WebSocket.OPEN) {
+    showMsg('⚠️ 中继未连接');
+    return false;
+  }
+  obj.v = RELAY_PROTOCOL_VERSION;
+  RELAY_WS.send(JSON.stringify(obj));
+  return true;
+}
+
+function connectRelay(ip, port) {
+  port = port || '81';
+  if (RELAY_WS) { try { RELAY_WS.close(); } catch(e) {} RELAY_WS = null; }
+  if (RELAY_RECONNECT_TIMER) { clearTimeout(RELAY_RECONNECT_TIMER); RELAY_RECONNECT_TIMER = null; }
+
+  showMsg('📡 正在连接 ' + ip + ':' + port + ' ...');
+
+  try {
+    RELAY_WS = new WebSocket('ws://' + ip + ':' + port + '/ws');
+  } catch(e) {
+    showMsg('❌ 连接失败：' + e.message);
+    return;
+  }
+
+  RELAY_WS.onopen = function() {
+    RELAY_CONNECTED = true;
+    RELAY_LAST_MSG_MS = Date.now();
+    showMsg('✅ 中继已连接');
+    try {
+      localStorage.setItem('panorama_relay_ip', ip);
+      localStorage.setItem('panorama_relay_port', port);
+    } catch(e) {}
+    updatePanelButtons();
+    // 保活心跳：每 3 秒 ping，超时判定死连接并快速重连
+    if (RELAY_PING_TIMER) clearInterval(RELAY_PING_TIMER);
+    RELAY_PING_TIMER = setInterval(function(){
+      if (!RELAY_WS || RELAY_WS.readyState !== WebSocket.OPEN) return;
+      try { RELAY_WS.send(JSON.stringify({cmd:'ping', v:RELAY_PROTOCOL_VERSION})); } catch(e) {}
+      if (Date.now() - RELAY_LAST_MSG_MS > 12000) {
+        showMsg('⚠️ 中继无响应，正在重连...');
+        try { RELAY_WS.close(); } catch(e) {}
+      }
+    }, 3000);
+    // 请求相机连接
+    relaySend({ cmd: 'connect_camera' });
+  };
+
+  RELAY_WS.onmessage = function(evt) {
+    RELAY_LAST_MSG_MS = Date.now();
+    try {
+      var msg = JSON.parse(evt.data);
+      handleRelayMessage(msg);
+    } catch(e) {
+      console.warn('中继消息解析失败', evt.data);
+    }
+  };
+
+  RELAY_WS.onerror = function() {
+    showMsg('⚠️ 中继连接异常');
+  };
+
+  RELAY_WS.onclose = function() {
+    RELAY_CONNECTED = false;
+    RELAY_CAMERA_READY = false;
+    if (RELAY_PING_TIMER) { clearInterval(RELAY_PING_TIMER); RELAY_PING_TIMER = null; }
+    updatePanelButtons();
+    showMsg('🔌 中继连接已断开');
+    // 自动重连
+    if (CAPTURE_MODE === 'relay') {
+      RELAY_RECONNECT_TIMER = setTimeout(function(){
+        connectRelay(ip, port);
+      }, 3000);
+    }
+  };
+}
+
+function handleRelayMessage(msg) {
+  switch (msg.type) {
+    case 'camera_status':
+      // ESP32-C6 上报的相机状态（周期推送，仅在状态变化时提示，避免刷屏）
+      var wasReady = RELAY_CAMERA_READY;
+      RELAY_CAMERA_READY = !!msg.connected;
+      RELAY_CAMERA_MODEL = msg.model || RELAY_CAMERA_MODEL;
+      if (msg.recording !== undefined) RELAY_STATUS.recording = msg.recording;
+      if (msg.battery !== undefined) RELAY_STATUS.battery = msg.battery;
+      if (msg.mode !== undefined) RELAY_STATUS.mode = msg.mode;
+      updatePanelButtons();
+      if (msg.message) {
+        showMsg((msg.connected ? '📷 ' : '⚠️ ') + msg.message);
+      } else if (RELAY_CAMERA_READY !== wasReady) {
+        if (msg.connected) showMsg('📷 相机已连接：' + (msg.model || 'DJI Osmo'));
+        else showMsg('⚠️ 相机未连接');
+      }
+      break;
+
+    case 'shoot_ack':
+      // 拍摄指令确认
+      if (msg.cmd_id === RELAY_LAST_CMD_ID) {
+        if (msg.success) {
+          showMsg('✅ 拍摄指令已确认');
+        } else {
+          showMsg('❌ 拍摄失败：' + (msg.error || '未知错误'));
+        }
+      }
+      break;
+
+    case 'capture_complete':
+      // 相机已完成拍摄（来自 FFF4 通知的回传）
+      handleRelayCaptureComplete(msg);
+      break;
+
+    case 'error':
+      showMsg('⚠️ 中继错误：' + (msg.message || '未知'));
+      break;
+
+    case 'pong':
+    case 'heartbeat':
+      // 心跳响应：刷新保活时间戳
+      RELAY_LAST_MSG_MS = Date.now();
+      break;
+
+    default:
+      console.log('中继消息：', msg);
+  }
+}
+
+function handleRelayCaptureComplete(msg) {
+  // 中继模式下，相机确认拍摄完成后，自动完成当前点位
+  if (!ACTIVE) return;
+  var m = findMarker(ACTIVE);
+  if (!m || m.status !== 'pending') return;
+
+  // 清除超时计时器
+  if (m._relayTimeout) { clearTimeout(m._relayTimeout); m._relayTimeout = null; }
+
+  // 记录拍摄时间（使用 ESP32-C6 回传的时间戳或本地时间）
+  m.captureTime = msg.timestamp || getLocalTimeStr(new Date());
+  m.startTime = msg.timestamp || getLocalTimeStr(new Date());
+  m.endTime = getLocalTimeStr(new Date());
+  m.status = 'captured';
+  m.captureSource = 'relay';  // 标记来源
+
+  saveData();
+  updateDots();
+  $('panel').style.display = 'none';
+  CAPTURE_START_TIME = null;
+  PENDING_MARKER_ID = null;
+  centerOnMarker(m);
+  showMsg('✅ 中继拍摄完成，点位已记录');
+}
+
+// ========== 中继面板 UI ==========
+function showRelayConnectPanel() {
+  var savedIP = localStorage.getItem('panorama_relay_ip') || '192.168.4.1';
+  var savedPort = localStorage.getItem('panorama_relay_port') || '81';
+  $('relayIP').value = savedIP;
+  $('relayPort').value = savedPort;
+  $('relayConnectPanel').style.display = 'block';
+}
+function hideRelayConnectPanel() { $('relayConnectPanel').style.display = 'none'; }
+function doConnectRelay() {
+  var ip = $('relayIP').value.trim();
+  var port = $('relayPort').value.trim() || '81';
+  if (!ip) { showMsg('请输入 IP 地址'); return; }
+  hideRelayConnectPanel();
+  connectRelay(ip, port);
+}
+function showRelayStatus() {
+  var html = '';
+  html += '<div>🔗 WebSocket：' + (RELAY_CONNECTED ? '<span style="color:#30d158;">已连接</span>' : '<span style="color:#ff453a;">未连接</span>') + '</div>';
+  html += '<div>📷 相机：' + (RELAY_CAMERA_READY ? '<span style="color:#30d158;">' + (RELAY_CAMERA_MODEL || '已连接') + '</span>' : '<span style="color:#ff453a;">未连接</span>') + '</div>';
+  html += '<div>🎬 录像状态：' + (RELAY_STATUS.recording ? '<span style="color:#ff453a;">录制中</span>' : '<span style="color:#8e8e93;">待机</span>') + '</div>';
+  html += '<div>🔋 电量：' + (RELAY_STATUS.battery >= 0 ? RELAY_STATUS.battery + '%' : '--') + '</div>';
+  html += '<div>📸 相机模式：' + (RELAY_STATUS.mode === 'photo' ? '照片' : RELAY_STATUS.mode === 'video' ? '录像' : '--') + '</div>';
+  $('relayStatusContent').innerHTML = html;
+  $('relayStatusPanel').style.display = 'block';
+}
+function hideRelayStatus() { $('relayStatusPanel').style.display = 'none'; }
+function disconnectRelay() {
+  if (RELAY_RECONNECT_TIMER) { clearTimeout(RELAY_RECONNECT_TIMER); RELAY_RECONNECT_TIMER = null; }
+  if (RELAY_PING_TIMER) { clearInterval(RELAY_PING_TIMER); RELAY_PING_TIMER = null; }
+  if (RELAY_WS) { try { RELAY_WS.close(); } catch(e) {} RELAY_WS = null; }
+  RELAY_CONNECTED = false;
+  RELAY_CAMERA_READY = false;
+  hideRelayStatus();
+  updatePanelButtons();
+  showMsg('已断开中继');
+}
+function showRelaySettings() {
+  showRelayConnectPanel();
+}
+
 function doCapture(){
-  if(!ACTIVE) return;
+  if(!ACTIVE) { showMsg('⚠️ 请先点击平面图上的采集点'); return; }
   var m=findMarker(ACTIVE);
-  if(!m) return;
-  if (PHONE_CAMERA_MODE) {
+  if(!m) { showMsg('⚠️ 采集点数据异常'); return; }
+
+  // ===== 中继模式 =====
+  if (CAPTURE_MODE === 'relay') {
+    if (!RELAY_CONNECTED) { showMsg('⚠️ 中继未连接，请先连接'); showRelayConnectPanel(); return; }
+    if (!RELAY_CAMERA_READY) { showMsg('⚠️ 相机未连接，正在尝试重连...'); relaySend({cmd: 'reconnect_camera'}); return; }
+
+    var cmdId = 'cmd_' + Date.now();
+    RELAY_LAST_CMD_ID = cmdId;
+
+    // 根据拍摄类型决定拍照还是录像
+    var action = (PHONE_CAPTURE_TYPE === 'video') ? 'start_record' : 'shoot';
+
+    var ok = relaySend({
+      cmd: action,
+      cmd_id: cmdId,
+      marker_id: m.id,
+      floor_id: CURRENT_FLOOR,
+      capture_type: PHONE_CAPTURE_TYPE
+    });
+
+    if (ok) {
+      showMsg('📡 拍摄指令已发送给相机...');
+      // 超时保护：8 秒未收到回传则提示
+      var timeoutId = setTimeout(function(){
+        if (ACTIVE === m.id && m.status === 'pending') {
+          showMsg('⚠️ 相机响应超时，请检查 ESP32-C6 和相机连接');
+        }
+      }, 8000);
+      // 将 timeoutId 挂到 marker 上，收到回传时清除
+      m._relayTimeout = timeoutId;
+    }
+    return;
+  }
+
+  // ===== 本机模式 =====
+  if (CAPTURE_MODE === 'phone') {
     if (!lastPhotoBlob) {
       PENDING_FINISH_AFTER_CAPTURE = true;
       PENDING_SAVE_AFTER_CAPTURE = true;
@@ -2633,6 +2960,8 @@ function doCapture(){
     }
     doSavePhotoToAlbum(lastPhotoBlob, lastPhotoName);
   }
+
+  // 方向设置（本机/外设模式共用）
   if(DIRECTION_MODE === 'north'){ m.direction = 0; finishCapture(m); }
   else if(DIRECTION_MODE === 'manual'){ showAlignGuidePanel(m); }
   else { finishCapture(m); }

@@ -7,7 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>影像位置采集系统</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="jszip.min.js"></script>
 <style>
 * { margin:0; padding:0; -webkit-tap-highlight-color:transparent; box-sizing:border-box; }
 body { background:#000; color:#fff; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow:hidden; }
@@ -446,18 +446,9 @@ body { background:#000; color:#fff; font-family:-apple-system, BlinkMacSystemFon
 <div id="overlay" onclick="hideSharePanel()"></div>
 <div id="sharePanel">
   <h3>📦 项目打包完成</h3>
-  <div id="nativeShareArea" style="display:none;">
-    <div class="native-share-tip">iPhone推荐：使用系统分享可直接发送到微信/邮件/保存到文件</div>
-    <button class="share-btn share-native" onclick="nativeShare()">点击使用系统分享</button>
-  </div>
-  <div id="fallbackArea">
-    <div class="download-tip">压缩包已生成</div>
-    <div id="iosTip" class="ios-tip" style="display:none;"></div>
-    <div class="file-info">文件大小: <span id="zipSize">--</span> MB<br>文件名: <span id="zipName" style="color:#fff;">--</span></div>
-    <button class="share-btn share-email" onclick="shareByEmail()">📧 邮件发送</button>
-    <button class="share-btn share-wechat" onclick="shareToWeChat()">💬 分享到微信</button>
-    <button class="share-btn share-copy" onclick="manualSaveFile()">📁 手动保存文件</button>
-  </div>
+  <div class="file-info">文件大小: <span id="zipSize">--</span> MB<br>文件名: <span id="zipName" style="color:#fff;">--</span></div>
+  <button class="share-btn share-native" onclick="openOrShareZip()">📤 用其他应用打开 / 分享</button>
+  <div id="iosTip" class="ios-tip" style="display:none;"></div>
   <div class="feedback-section">
     <p>📱 问题反馈 / 技术交流群</p>
     <p>微信号：<strong>amwtuadwe</strong> 
@@ -496,10 +487,44 @@ body { background:#000; color:#fff; font-family:-apple-system, BlinkMacSystemFon
 <div id="relayStatusPanel" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1c1c1e; padding:25px; border-radius:16px; min-width:300px; max-width:90vw; display:none; z-index:600; border:1px solid #333;">
   <h3 style="margin-bottom:15px; font-size:17px; text-align:center;">📊 中继状态</h3>
   <div id="relayStatusContent" style="font-size:14px; line-height:2; color:#ccc;"></div>
+  <div style="margin-top:15px; border-top:1px solid #333; padding-top:12px;">
+    <div style="color:#8e8e93; font-size:13px; margin-bottom:8px;">⚙️ 相机控制（点击即通过中继远程切换）</div>
+    <div id="modeBtns" style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px;"></div>
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <button onclick="relaySend({cmd:'start_record'})" style="flex:1; padding:10px; background:#ff453a; color:#fff; border:none; border-radius:8px; font-size:13px;">⏺ 开始录像</button>
+      <button onclick="relaySend({cmd:'stop_record'})" style="flex:1; padding:10px; background:#ff9500; color:#000; border:none; border-radius:8px; font-size:13px;">⏹ 停止录像</button>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button onclick="relaySend({cmd:'sleep_camera'})" style="flex:1; padding:10px; background:#2c2c2e; color:#ccc; border:none; border-radius:8px; font-size:13px;">😴 休眠</button>
+      <button onclick="relaySend({cmd:'wake_camera'})" style="flex:1; padding:10px; background:#2c2c2e; color:#ccc; border:none; border-radius:8px; font-size:13px;">☀️ 唤醒</button>
+      <button onclick="if(confirm('确定重启相机？重启后需重新连接'))relaySend({cmd:'reboot_camera'})" style="flex:1; padding:10px; background:#2c2c2e; color:#ccc; border:none; border-radius:8px; font-size:13px;">🔄 重启</button>
+    </div>
+  </div>
   <div style="display:flex; gap:10px; margin-top:20px;">
     <button onclick="relaySend({cmd:'reconnect_camera'})" style="flex:1; padding:12px; background:#0a84ff; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600;">重连相机</button>
-    <button onclick="disconnectRelay()" style="flex:1; padding:12px; background:#ff453a; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600;">断开中继</button>
+    <button onclick="showRelayWifiPanel()" style="flex:1; padding:12px; background:#5856d6; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600;">📶 修改热点</button>
+    <button onclick="disconnectRelay()" style="flex:1; padding:12px; background:#ff453a; color:#fff; border:none; border-radius:10px; font-size:14px; font-weight:600;">断开</button>
     <button onclick="hideRelayStatus()" style="flex:1; padding:12px; background:#48484a; color:#fff; border:none; border-radius:10px; font-size:14px;">关闭</button>
+  </div>
+</div>
+
+<!-- 修改热点面板 -->
+<div id="relayWifiPanel" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:#1c1c1e; padding:25px; border-radius:16px; min-width:320px; max-width:90vw; display:none; z-index:610; border:1px solid #333;">
+  <h3 style="margin-bottom:15px; font-size:17px; text-align:center;">📶 修改中继热点</h3>
+  <div style="margin-bottom:15px;">
+    <label style="display:block; margin-bottom:8px; color:#8e8e93; font-size:14px;">热点名称（1~32 字符）</label>
+    <input type="text" id="wifiSsid" maxlength="32" style="width:100%; padding:12px; background:#2c2c2e; color:#fff; border:1px solid #38383a; border-radius:8px; font-size:16px; box-sizing:border-box;">
+  </div>
+  <div style="margin-bottom:15px;">
+    <label style="display:block; margin-bottom:8px; color:#8e8e93; font-size:14px;">密码（8~63 字符，留空保持原密码）</label>
+    <input type="password" id="wifiPass" maxlength="63" placeholder="留空保持原密码" style="width:100%; padding:12px; background:#2c2c2e; color:#fff; border:1px solid #38383a; border-radius:8px; font-size:16px; box-sizing:border-box;">
+  </div>
+  <div style="display:flex; gap:10px;">
+    <button onclick="doSaveWifi()" style="flex:1; padding:14px; background:#30d158; color:#000; border:none; border-radius:10px; font-size:15px; font-weight:600;">保存并生效</button>
+    <button onclick="hideRelayWifiPanel()" style="flex:1; padding:14px; background:#48484a; color:#fff; border:none; border-radius:10px; font-size:15px;">取消</button>
+  </div>
+  <div style="margin-top:15px; font-size:12px; color:#8e8e93; line-height:1.6;">
+    保存后立即生效并断电保留。热点变更后，请重新连接新名称的热点，再访问 192.168.4.1。
   </div>
 </div>
 
@@ -635,13 +660,53 @@ var RELAY_STATUS = {              // 相机实时状态
   recording: false,
   battery: -1,
   sdFreeMB: -1,
-  mode: 'unknown'                 // 'photo' | 'video' | 'unknown'
+  mode: 'unknown',                // 'photo' | 'video' | 'unknown'
+  camstatus: -1,                  // 0=息屏 1=待机 2=回放 3=拍摄中 5=预录制
+  cname: '', cparam: '',          // 模式名/参数原文（如 PANO PHOTO / 120MP）
+  temp10: -1,                     // 温度 0.1°C
+  rphoto: -1,                     // 剩余可拍张数
+  rtime: -1,                      // 剩余录像时间（秒）
+  power: -1,                      // 0=正常 3=休眠
+  tover: -1,                      // 0=正常 1=警告 2=高温不可录 3=过热将关机
+  res: -1, fps: -1, ratio: -1,    // 分辨率/帧率/照片比例代码
+  cammode: -1                     // 原始模式代码
 };
 var RELAY_RECONNECT_TIMER = null; // 自动重连计时器
 var RELAY_PING_TIMER = null;      // 保活心跳计时器
 var RELAY_LAST_MSG_MS = 0;        // 最近一次收到中继消息的时间
-var RELAY_CAPTURE_BUSY = false;   // 相机正在处理拍摄（此时禁止放置新采集点）
+var CAM_MODES = [                  // Osmo 360 可远程切换的拍摄模式
+  ['0x3F','全景拍照'], ['0x05','拍照'], ['0x38','全景视频'], ['0x01','视频'],
+  ['0x41','极广角视频'], ['0x00','慢动作'], ['0x3A','运动延时'], ['0x44','全景夜景'],
+  ['0x43','时空凝固'], ['0x4A','单镜夜景'], ['0x3C','自拍']
+];
+function renderModeBtns() {
+  var wrap = $('modeBtns');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  CAM_MODES.forEach(function(m) {
+    var cur = (RELAY_STATUS.cammode === parseInt(m[0], 16));
+    var b = document.createElement('button');
+    b.textContent = m[1];
+    b.style.cssText = 'padding:10px 4px;border:none;border-radius:8px;font-size:13px;' +
+      (cur ? 'background:#30d158;color:#000;font-weight:600;' : 'background:#2c2c2e;color:#ccc;');
+    b.onclick = function() {
+      relaySend({cmd:'switch_mode', mode: parseInt(m[0], 16)});
+      showMsg('⏳ 正在切换到「' + m[1] + '」...');
+    };
+    wrap.appendChild(b);
+  });
+}
+var RELAY_CAPTURE_BUSY = false;   // 相机正在处理拍摄（此时禁止放置新采集点、锁定导出）
 var RELAY_BUSY_TIMER = null;      // 忙碌状态兜底解锁计时器
+var RELAY_SSID = '';              // 中继当前热点名（来自状态消息）
+
+function setRelayExportLock(locked){
+  // 拍摄处理期间锁定导出按钮，避免导出面板打断完成反馈
+  var btn=$('btnExport');
+  if(!btn) return;
+  btn.disabled=locked;
+  btn.style.opacity=locked?'0.4':'1';
+}
 
 // ========== 保存到相册临时数据 ==========
 var lastPhotoBlob = null;
@@ -2287,7 +2352,8 @@ wrap.addEventListener('touchstart', function(e){
     clickStart = {x:p.x, y:p.y, t:Date.now()};
     isDragging = false;
     var hit = hitTest(p.x, p.y);
-    if(hit && hit.status === 'captured'){
+    if(hit){
+      // 长按任意点位（含未拍摄的灰点）进入编辑面板，可移动/删除
       longPressTimer = setTimeout(function(){
         ACTIVE = hit.id;
         showEditPanel();
@@ -2550,8 +2616,8 @@ function togglePhoneCameraMode(){
   } else {
     showMsg('📡 中继模式 — 请确保 ESP32-C6 已通电');
     // 尝试自动重连上次的中继地址
-    var savedIP = localStorage.getItem('panorama_relay_ip');
-    if (savedIP && !RELAY_CONNECTED) connectRelay(savedIP, localStorage.getItem('panorama_relay_port') || '81');
+    var savedIP = localStorage.getItem('panorama_relay_ip') || defaultRelayIP();
+    if (!RELAY_CONNECTED) connectRelay(savedIP, localStorage.getItem('panorama_relay_port') || '81');
   }
   updateSaveAlbumButton();
 }
@@ -2829,10 +2895,26 @@ function handleRelayMessage(msg) {
       var wasReady = RELAY_CAMERA_READY;
       RELAY_CAMERA_READY = !!msg.connected;
       RELAY_CAMERA_MODEL = msg.model || RELAY_CAMERA_MODEL;
+      if (msg.ssid) RELAY_SSID = msg.ssid;
       if (msg.recording !== undefined) RELAY_STATUS.recording = msg.recording;
       if (msg.battery !== undefined) RELAY_STATUS.battery = msg.battery;
       if (msg.mode !== undefined) RELAY_STATUS.mode = msg.mode;
+      if (msg.camstatus !== undefined) RELAY_STATUS.camstatus = msg.camstatus;
+      if (msg.cammode !== undefined) RELAY_STATUS.cammode = msg.cammode;
+      if (msg.cname !== undefined) RELAY_STATUS.cname = msg.cname;
+      if (msg.cparam !== undefined) RELAY_STATUS.cparam = msg.cparam;
+      if (msg.temp10 !== undefined) RELAY_STATUS.temp10 = msg.temp10;
+      if (msg.rphoto !== undefined) RELAY_STATUS.rphoto = msg.rphoto;
+      if (msg.rtime !== undefined) RELAY_STATUS.rtime = msg.rtime;
+      if (msg.power !== undefined) RELAY_STATUS.power = msg.power;
+      if (msg.tover !== undefined) RELAY_STATUS.tover = msg.tover;
+      if (msg.res !== undefined) RELAY_STATUS.res = msg.res;
+      if (msg.fps !== undefined) RELAY_STATUS.fps = msg.fps;
+      if (msg.ratio !== undefined) RELAY_STATUS.ratio = msg.ratio;
       updatePanelButtons();
+      // 状态面板打开中则实时刷新内容
+      var stPanel = $('relayStatusPanel');
+      if (stPanel && stPanel.style.display === 'block') showRelayStatus();
       if (msg.message) {
         showMsg((msg.connected ? '📷 ' : '⚠️ ') + msg.message);
       } else if (RELAY_CAMERA_READY !== wasReady) {
@@ -2857,9 +2939,17 @@ function handleRelayMessage(msg) {
       handleRelayCaptureComplete(msg);
       break;
 
+    case 'wifi_saved':
+      // 热点已保存并生效：设备会切换热点，本连接即将断开
+      RELAY_SSID = msg.ssid || RELAY_SSID;
+      try { localStorage.setItem('panorama_relay_ssid', RELAY_SSID); } catch(e) {}
+      showMsg('✅ 热点已更新为「' + RELAY_SSID + '」，请重新连接新热点');
+      break;
+
     case 'error':
       // 拍摄失败：清除忙碌状态（点位保持待采集）
       RELAY_CAPTURE_BUSY = false;
+      setRelayExportLock(false);
       if (RELAY_BUSY_TIMER) { clearTimeout(RELAY_BUSY_TIMER); RELAY_BUSY_TIMER = null; }
       showMsg('⚠️ ' + (msg.message || '中继错误'));
       break;
@@ -2878,6 +2968,7 @@ function handleRelayMessage(msg) {
 function handleRelayCaptureComplete(msg) {
   // 相机确认"拍摄并保存完毕"：只完成消息指定的点位（msg.marker_id）
   RELAY_CAPTURE_BUSY = false;
+  setRelayExportLock(false);
   if (RELAY_BUSY_TIMER) { clearTimeout(RELAY_BUSY_TIMER); RELAY_BUSY_TIMER = null; }
 
   var targetId = msg.marker_id || ACTIVE;
@@ -2907,8 +2998,13 @@ function handleRelayCaptureComplete(msg) {
 }
 
 // ========== 中继面板 UI ==========
+// 默认中继 IP：页面由 ESP32 托管时取当前主机名，否则用默认热点地址
+function defaultRelayIP(){
+  var h = location.hostname || '';
+  return /^(192\.168\.|10\.|172\.|127\.)/.test(h) ? h : '192.168.4.1';
+}
 function showRelayConnectPanel() {
-  var savedIP = localStorage.getItem('panorama_relay_ip') || '192.168.4.1';
+  var savedIP = localStorage.getItem('panorama_relay_ip') || defaultRelayIP();
   var savedPort = localStorage.getItem('panorama_relay_port') || '81';
   $('relayIP').value = savedIP;
   $('relayPort').value = savedPort;
@@ -2923,16 +3019,64 @@ function doConnectRelay() {
   connectRelay(ip, port);
 }
 function showRelayStatus() {
+  var S = RELAY_STATUS;
   var html = '';
   html += '<div>🔗 WebSocket：' + (RELAY_CONNECTED ? '<span style="color:#30d158;">已连接</span>' : '<span style="color:#ff453a;">未连接</span>') + '</div>';
   html += '<div>📷 相机：' + (RELAY_CAMERA_READY ? '<span style="color:#30d158;">' + (RELAY_CAMERA_MODEL || '已连接') + '</span>' : '<span style="color:#ff453a;">未连接</span>') + '</div>';
-  html += '<div>🎬 录像状态：' + (RELAY_STATUS.recording ? '<span style="color:#ff453a;">录制中</span>' : '<span style="color:#8e8e93;">待机</span>') + '</div>';
-  html += '<div>🔋 电量：' + (RELAY_STATUS.battery >= 0 ? RELAY_STATUS.battery + '%' : '--') + '</div>';
-  html += '<div>📸 相机模式：' + (RELAY_STATUS.mode === 'photo' ? '照片' : RELAY_STATUS.mode === 'video' ? '录像' : '--') + '</div>';
+  // 模式原文 + 参数（如 PANO PHOTO (120MP)）
+  if (S.cname) html += '<div>🎬 模式：' + escapeHtml(S.cname) + (S.cparam ? ' <span style="color:#8e8e93;">(' + escapeHtml(S.cparam) + ')</span>' : '') + '</div>';
+  // 相机状态
+  var stMap = {0:'屏幕关闭', 1:'待机', 2:'回放', 3:'拍摄中', 5:'预录制中'};
+  if (S.camstatus >= 0 && stMap[S.camstatus] !== undefined) {
+    html += '<div>⚡ 相机状态：' + (S.camstatus === 3 ? '<span style="color:#ff453a;">' + stMap[S.camstatus] + '</span>' : stMap[S.camstatus]) + '</div>';
+  }
+  html += '<div>🔋 电量：' + (S.battery >= 0 ? S.battery + '%' : '--') + '</div>';
+  if (S.temp10 >= 0) html += '<div>🌡️ 温度：' + (S.temp10 / 10).toFixed(1) + '°C</div>';
+  if (S.tover > 0) {
+    var toTxt = {1:'⚠️ 温度警告', 2:'🔥 高温，无法录制', 3:'🔥 过热，即将关机'}[S.tover] || '';
+    if (toTxt) html += '<div style="color:#ff453a;">' + toTxt + '</div>';
+  }
+  if (S.sdFreeMB >= 0) {
+    html += '<div>💾 SD 剩余：' + (S.sdFreeMB >= 1024 ? (S.sdFreeMB / 1024).toFixed(1) + ' GB' : S.sdFreeMB + ' MB') + '</div>';
+  }
+  if (S.rphoto >= 0) html += '<div>📸 剩余可拍：' + S.rphoto + ' 张</div>';
+  if (S.rtime > 0) {
+    var h = Math.floor(S.rtime / 3600), mnt = Math.floor((S.rtime % 3600) / 60), sec = S.rtime % 60;
+    html += '<div>⏱️ 剩余录像：' + (h > 0 ? h + '时' : '') + mnt + '分' + sec + '秒</div>';
+  }
+  // 分辨率/帧率（录像模式时有意义）
+  if (S.res >= 0) {
+    var resMap = {10:'1080P', 16:'4K 16:9', 45:'2.7K 16:9', 66:'1080P 9:16', 67:'2.7K 9:16', 95:'2.7K 4:3', 103:'4K 4:3', 109:'4K 9:16', 4:'Ultra Wide 30MP', 3:'Wide 20MP', 2:'Standard 12MP'};
+    var fpsMap = {1:'24', 2:'25', 3:'30', 4:'48', 5:'50', 6:'60', 10:'100', 7:'120', 19:'200', 8:'240'};
+    var resTxt = resMap[S.res] || '';
+    var fpsTxt = fpsMap[S.fps] || '';
+    if (resTxt || fpsTxt) html += '<div>🎞️ 画质：' + (resTxt || '--') + (fpsTxt ? ' @' + fpsTxt + 'fps' : '') + '</div>';
+  }
+  if (S.ratio >= 0 && S.mode === 'photo') html += '<div>🖼️ 照片比例：' + (S.ratio === 1 ? '16:9' : '4:3') + '</div>';
+  if (S.power === 3) html += '<div style="color:#ff9500;">😴 相机休眠中（可点下方 ☀️ 唤醒）</div>';
+  html += '<div>📸 相机模式：' + (S.mode === 'photo' ? '照片' : S.mode === 'video' ? '录像' : '--') + '</div>';
   $('relayStatusContent').innerHTML = html;
+  // 控制区：模式按钮组高亮当前模式
+  renderModeBtns();
   $('relayStatusPanel').style.display = 'block';
 }
 function hideRelayStatus() { $('relayStatusPanel').style.display = 'none'; }
+function showRelayWifiPanel() {
+  // 回显当前热点名（来自中继状态消息），密码不回显
+  $('wifiSsid').value = RELAY_SSID || 'OsmoRelay';
+  $('wifiPass').value = '';
+  hideRelayStatus();
+  $('relayWifiPanel').style.display = 'block';
+}
+function hideRelayWifiPanel() { $('relayWifiPanel').style.display = 'none'; }
+function doSaveWifi() {
+  var ssid = $('wifiSsid').value.trim();
+  var pass = $('wifiPass').value;
+  if (!ssid) { showMsg('请输入热点名称'); return; }
+  if (pass && pass.length < 8) { showMsg('密码至少 8 个字符（或留空保持原密码）'); return; }
+  if (!relaySend({cmd:'set_wifi', ssid: ssid, pass: pass})) return;
+  hideRelayWifiPanel();
+}
 function disconnectRelay() {
   if (RELAY_RECONNECT_TIMER) { clearTimeout(RELAY_RECONNECT_TIMER); RELAY_RECONNECT_TIMER = null; }
   if (RELAY_PING_TIMER) { clearInterval(RELAY_PING_TIMER); RELAY_PING_TIMER = null; }
@@ -2972,10 +3116,11 @@ function doCapture(){
     });
 
     if (ok) {
-      // 相机忙碌锁定：处理完成前禁止放置新采集点（20 秒兜底自动解锁）
+      // 相机忙碌锁定：处理完成前禁止放置新采集点、锁定导出（20 秒兜底自动解锁）
       RELAY_CAPTURE_BUSY = true;
+      setRelayExportLock(true);
       if (RELAY_BUSY_TIMER) clearTimeout(RELAY_BUSY_TIMER);
-      RELAY_BUSY_TIMER = setTimeout(function(){ RELAY_CAPTURE_BUSY = false; }, 20000);
+      RELAY_BUSY_TIMER = setTimeout(function(){ RELAY_CAPTURE_BUSY = false; setRelayExportLock(false); }, 20000);
       showMsg('📡 拍摄指令已发送给相机...');
       // 超时保护：8 秒未收到回传则提示（点位保持灰色待采集）
       var timeoutId = setTimeout(function(){
@@ -3100,6 +3245,11 @@ function showPreview(){
 function closePreview(){ $('previewPanel').style.display='none'; }
 
 async function doExport(){
+  // 中继模式：上一次拍摄未完成前禁止导出，避免打断完成反馈
+  if (CAPTURE_MODE === 'relay' && RELAY_CAPTURE_BUSY) {
+    showMsg('⚠️ 相机正在处理上一次拍摄，完成后再导出');
+    return;
+  }
   completeAnyPendingMarker();
   if(!PROJ||FLOORS.length===0){showMsg('无数据');return}
   var floorsWithPlan=FLOORS.filter(f=>!!FLOORPLANS[f.id]);
@@ -3125,15 +3275,8 @@ async function doExport(){
     $('overlay').style.display='block';
     $('sharePanel').style.display='block';
     $('shareHint').style.display='none';
-    var canNativeShare=navigator.canShare&&navigator.canShare({files:[new File([zipBlob],zipName,{type:'application/zip'})]});
-    var isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream;
-    if(canNativeShare&&isIOS){ $('nativeShareArea').style.display='block'; $('fallbackArea').style.display='none'; }
-    else { $('nativeShareArea').style.display='none'; $('fallbackArea').style.display='block'; if(isIOS){ $('iosTip').innerHTML='如果无法自动下载，请点击「手动保存文件」按钮'; $('iosTip').style.display='block'; } }
-    var url=URL.createObjectURL(zipBlob);
-    var a=document.createElement('a');
-    a.href=url; a.download=zipName;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // 分享面板只保留一个按钮：点击时用其他应用打开/分享压缩包
+    $('iosTip').style.display='none';
   }catch(e){ console.error(e); showMsg('打包失败，降级JSON'); fallbackExport(); }
 }
 function fallbackExport(){
@@ -3161,17 +3304,58 @@ async function nativeShare(){
     catch(e){ showMsg('分享取消或失败'); }
   }
 }
-function shareByEmail(){ showMsg('请手动发送文件'); }
-function shareToWeChat(){ showMsg('请手动发送文件'); }
+function openOrShareZip(){
+  // 唯一的分享按钮：优先系统分享面板（微信/邮件/AirDrop 均在其中），
+  // 不支持时自动下载 zip 到「文件」App，再由用户用其他应用打开
+  if(!tempZipBlob){ showMsg('请先导出'); return; }
+  var zipName=PROJ.name.replace(/[^\w\u4e00-\u9fa5]/g,'_')+'_'+formatDate(new Date())+'.zip';
+  var file=new File([tempZipBlob],zipName,{type:'application/zip'});
+  var tip=$('iosTip');
+  if(navigator.share){
+    // 直接调用系统共享（iOS 分享面板含微信/邮件/AirDrop/存储到文件等）
+    navigator.share({files:[file],title:PROJ.name})
+      .then(function(){ showMsg('✅ 分享成功'); hideSharePanel(); })
+      .catch(function(e){
+        if(e.name==='AbortError') return;   // 用户取消
+        fallbackOpenZip(zipName, tip);
+      });
+  } else {
+    fallbackOpenZip(zipName, tip);
+  }
+}
+function fallbackOpenZip(zipName, tip){
+  triggerFileDownload(tempZipBlob, zipName);
+  if(tip){
+    tip.innerHTML='📂 已保存到「文件」App。<br>打开「文件」→ 长按该压缩包 →「分享」<br>即可发送到微信 / 邮件 / AirDrop 等';
+    tip.style.display='block';
+  }
+  showMsg('📂 已保存到「文件」App');
+}
+function shareByEmail(){ openOrShareZip(); }
+function shareToWeChat(){ openOrShareZip(); }
+async function trySystemShare(){
+  // 尝试系统分享面板（可发微信/邮件/AirDrop）；失败则保存到「文件」App
+  if(!tempZipBlob){ showMsg('请先导出'); return; }
+  var zipName=PROJ.name.replace(/[^\w\u4e00-\u9fa5]/g,'_')+'_'+formatDate(new Date())+'.zip';
+  var file=new File([tempZipBlob],zipName,{type:'application/zip'});
+  if(navigator.share&&navigator.canShare&&navigator.canShare({files:[file]})){
+    try{
+      await navigator.share({files:[file],title:PROJ.name});
+      showMsg('✅ 分享成功'); hideSharePanel();
+      return;
+    }catch(e){
+      if(e.name==='AbortError'){ showMsg('已取消分享'); return; }
+      // 继续走保存回退
+    }
+  }
+  triggerFileDownload(tempZipBlob, zipName);
+  showMsg('📂 已保存到「文件」App：请在微信（我→文件）或邮件中添加该文件发送');
+}
 function manualSaveFile(){
   if(tempZipBlob){
     var zipName=PROJ.name.replace(/[^\w\u4e00-\u9fa5]/g,'_')+'_'+formatDate(new Date())+'.zip';
-    var url=URL.createObjectURL(tempZipBlob);
-    var a=document.createElement('a');
-    a.href=url; a.download=zipName;
-    document.body.appendChild(a); a.click();
-    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); },1000);
-    showMsg('已尝试保存文件');
+    triggerFileDownload(tempZipBlob, zipName);
+    showMsg('📂 已保存到「文件」App');
   }
 }
 

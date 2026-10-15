@@ -640,6 +640,8 @@ var RELAY_STATUS = {              // 相机实时状态
 var RELAY_RECONNECT_TIMER = null; // 自动重连计时器
 var RELAY_PING_TIMER = null;      // 保活心跳计时器
 var RELAY_LAST_MSG_MS = 0;        // 最近一次收到中继消息的时间
+var RELAY_CAPTURE_BUSY = false;   // 相机正在处理拍摄（此时禁止放置新采集点）
+var RELAY_BUSY_TIMER = null;      // 忙碌状态兜底解锁计时器
 
 // ========== 保存到相册临时数据 ==========
 var lastPhotoBlob = null;
@@ -751,6 +753,19 @@ function refreshCurrentFloorView(){
 function completeAnyPendingMarker(){
   var targetId = PENDING_MARKER_ID || ACTIVE;
   if (!targetId) return;
+  // 中继模式：点位完成由相机回传确认，这里只清理面板状态，不自动标记
+  if (CAPTURE_MODE === 'relay') {
+    PENDING_MARKER_ID = null;
+    ACTIVE = null;
+    $('panel').style.display = 'none';
+    CAPTURE_START_TIME = null;
+    PENDING_SAVE_AFTER_CAPTURE = false;
+    PENDING_FINISH_AFTER_CAPTURE = false;
+    lastPhotoBlob = null;
+    lastPhotoName = '';
+    if (typeof updateSaveAlbumButton === 'function') updateSaveAlbumButton();
+    return;
+  }
   // 遍历所有楼层查找匹配的 pending 点位（防止 CURRENT_FLOOR 切换导致找不到）
   var found = null;
   var foundFloorId = null;
@@ -2368,6 +2383,12 @@ function hitTest(cx, cy){
 var PENDING_MARKER_ID = null;
 function autoCompletePendingCapture(){
   if(!PENDING_MARKER_ID) return;
+  // 中继模式：点位完成由相机回传确认，点击空白处只收起面板，不自动标记
+  if (CAPTURE_MODE === 'relay') {
+    PENDING_MARKER_ID = null;
+    $('panel').style.display = 'none';
+    return;
+  }
   var m = findMarker(PENDING_MARKER_ID);
   if(m && m.status === 'pending'){
     m.status = 'captured';
@@ -2400,6 +2421,11 @@ function handleClick(cx, cy){
     if(hit.status === 'pending'){ ACTIVE = hit.id; showCapturePanel(); }
     else if(hit.status === 'captured'){ ACTIVE = hit.id; showEditPanel(); }
   } else {
+    // 中继模式：相机处理拍摄期间禁止放置新采集点，避免误判完成
+    if (CAPTURE_MODE === 'relay' && RELAY_CAPTURE_BUSY) {
+      showMsg('⚠️ 相机正在处理上一次拍摄，请稍后再放置采集点');
+      return;
+    }
     var ix = x / (IMG_W * SCALE);
     var iy = y / (IMG_H * SCALE);
     var id = 'm' + Date.now();
@@ -2832,7 +2858,10 @@ function handleRelayMessage(msg) {
       break;
 
     case 'error':
-      showMsg('⚠️ 中继错误：' + (msg.message || '未知'));
+      // 拍摄失败：清除忙碌状态（点位保持待采集）
+      RELAY_CAPTURE_BUSY = false;
+      if (RELAY_BUSY_TIMER) { clearTimeout(RELAY_BUSY_TIMER); RELAY_BUSY_TIMER = null; }
+      showMsg('⚠️ ' + (msg.message || '中继错误'));
       break;
 
     case 'pong':
@@ -2847,27 +2876,33 @@ function handleRelayMessage(msg) {
 }
 
 function handleRelayCaptureComplete(msg) {
-  // 中继模式下，相机确认拍摄完成后，自动完成当前点位
-  if (!ACTIVE) return;
-  var m = findMarker(ACTIVE);
+  // 相机确认"拍摄并保存完毕"：只完成消息指定的点位（msg.marker_id）
+  RELAY_CAPTURE_BUSY = false;
+  if (RELAY_BUSY_TIMER) { clearTimeout(RELAY_BUSY_TIMER); RELAY_BUSY_TIMER = null; }
+
+  var targetId = msg.marker_id || ACTIVE;
+  if (!targetId) return;
+  var m = findMarker(targetId);
   if (!m || m.status !== 'pending') return;
 
-  // 清除超时计时器
+  // 清除该点位的超时计时器
   if (m._relayTimeout) { clearTimeout(m._relayTimeout); m._relayTimeout = null; }
 
-  // 记录拍摄时间（使用 ESP32-C6 回传的时间戳或本地时间）
+  // 记录拍摄时间
   m.captureTime = msg.timestamp || getLocalTimeStr(new Date());
-  m.startTime = msg.timestamp || getLocalTimeStr(new Date());
+  m.startTime = m.captureTime;
   m.endTime = getLocalTimeStr(new Date());
   m.status = 'captured';
   m.captureSource = 'relay';  // 标记来源
 
   saveData();
   updateDots();
-  $('panel').style.display = 'none';
-  CAPTURE_START_TIME = null;
-  PENDING_MARKER_ID = null;
-  centerOnMarker(m);
+  if (ACTIVE === targetId) {
+    $('panel').style.display = 'none';
+    CAPTURE_START_TIME = null;
+    PENDING_MARKER_ID = null;
+    centerOnMarker(m);
+  }
   showMsg('✅ 中继拍摄完成，点位已记录');
 }
 
@@ -2937,11 +2972,15 @@ function doCapture(){
     });
 
     if (ok) {
+      // 相机忙碌锁定：处理完成前禁止放置新采集点（20 秒兜底自动解锁）
+      RELAY_CAPTURE_BUSY = true;
+      if (RELAY_BUSY_TIMER) clearTimeout(RELAY_BUSY_TIMER);
+      RELAY_BUSY_TIMER = setTimeout(function(){ RELAY_CAPTURE_BUSY = false; }, 20000);
       showMsg('📡 拍摄指令已发送给相机...');
-      // 超时保护：8 秒未收到回传则提示
+      // 超时保护：8 秒未收到回传则提示（点位保持灰色待采集）
       var timeoutId = setTimeout(function(){
         if (ACTIVE === m.id && m.status === 'pending') {
-          showMsg('⚠️ 相机响应超时，请检查 ESP32-C6 和相机连接');
+          showMsg('⚠️ 相机尚未确认拍摄（可能正在保存上一张），请稍后点「📸 拍摄」重拍');
         }
       }, 8000);
       // 将 timeoutId 挂到 marker 上，收到回传时清除
